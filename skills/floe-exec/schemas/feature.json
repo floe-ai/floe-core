@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://floe.ai/schemas/feature.json",
+  "title": "Feature",
+  "description": "The lowest durable execution unit. A concrete behaviour or outcome that can be validated.",
+  "type": "object",
+  "required": ["id", "epic_id", "title", "status", "behaviour", "priority"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^feat-[a-z0-9-]+$",
+      "description": "Unique feature identifier, e.g. feat-login-form"
+    },
+    "epic_id": {
+      "type": "string",
+      "description": "Parent epic ID"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "status": {
+      "type": "string",
+      "enum": ["draft", "active", "blocked", "completed", "cancelled"]
+    },
+    "behaviour": {
+      "type": "string",
+      "description": "What this feature does from the user or system perspective"
+    },
+    "priority": {
+      "type": "string",
+      "enum": ["critical", "high", "normal", "low", "parked"]
+    },
+    "dependencies": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "IDs of other features this depends on"
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "file_hints": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "Likely files or paths that will be touched"
+    },
+    "test_hints": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "Likely verification surfaces or test approaches"
+    },
+    "architecture_considerations": {
+      "type": "string",
+      "description": "Constraints, interfaces, or patterns that affect implementation"
+    },
+    "execution_state": {
+      "type": "object",
+      "properties": {
+        "run_count": { "type": "integer", "default": 0 },
+        "failed_runs": { "type": "integer", "default": 0 },
+        "last_run_outcome": {
+          "type": "string",
+          "enum": ["pass", "fail", "blocked", "needs_replan", "not_started"]
+        },
+        "last_failure_class": {
+          "type": "string",
+          "enum": [
+            "missing_context", "ambiguous_requirement", "architecture_conflict",
+            "environment_issue", "flaky_test", "dependency_not_ready",
+            "feature_too_large", "implementation_error", "unexpected_regression"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "review_state": {
+      "type": "object",
+      "properties": {
+        "review_id": { "type": "string", "description": "ID of the rolling review for this feature" },
+        "current_outcome": {
+          "type": "string",
+          "enum": ["pass", "fail", "blocked", "needs_replan", "pending"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "additionalProperties": false
+}

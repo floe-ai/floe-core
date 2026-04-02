@@ -1,0 +1,6 @@
+# Runtime state — not committed
+state/
+
+# Memory DB — managed by floe-mem
+memory/*.db
+memory/*.db-*

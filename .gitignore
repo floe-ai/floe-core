@@ -1,0 +1,16 @@
+# Runtime state — not committed
+.ai/state/
+.ai/memory/*.db
+.ai/memory/*.db-*
+
+# Node
+node_modules/
+
+# Bun
+bun.lockb
+
+# Build outputs  
+dist/
+
+# Test / temp
+*.tmp

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://floe.ai/schemas/release.json",
+  "title": "Release",
+  "description": "The highest level of targeted delivery work. Represents a coherent outcome intended to be shipped.",
+  "type": "object",
+  "required": ["id", "title", "status", "intent", "priority"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^rel-[a-z0-9-]+$",
+      "description": "Unique release identifier, e.g. rel-mvp-v1"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "status": {
+      "type": "string",
+      "enum": ["draft", "active", "blocked", "completed", "cancelled"]
+    },
+    "intent": {
+      "type": "string",
+      "description": "What this release delivers and why"
+    },
+    "priority": {
+      "type": "string",
+      "enum": ["critical", "high", "normal", "low", "parked"]
+    },
+    "dependencies": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "IDs of other releases this depends on"
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "Conditions that must hold for the release to be considered complete"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "additionalProperties": false
+}

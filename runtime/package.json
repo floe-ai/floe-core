@@ -1,0 +1,30 @@
+{
+  "name": "floe-runtime",
+  "version": "0.1.0",
+  "description": "Runtime MCP server and provider adapters for the floe execution framework",
+  "type": "module",
+  "bin": {
+    "floe-runtime": "./src/server.ts"
+  },
+  "scripts": {
+    "start": "bun run src/server.ts",
+    "dev": "bun --watch run src/server.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0"
+  },
+  "peerDependencies": {
+    "@openai/codex": "*",
+    "@anthropic-ai/sdk": "*",
+    "@github/copilot-sdk": "*"
+  },
+  "peerDependenciesMeta": {
+    "@openai/codex": { "optional": true },
+    "@anthropic-ai/sdk": { "optional": true },
+    "@github/copilot-sdk": { "optional": true }
+  }
+}
