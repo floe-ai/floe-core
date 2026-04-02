@@ -109,8 +109,10 @@ export class CopilotAdapter implements ProviderAdapter {
 
   async resumeSession(
     sessionId: string,
+    storedSession: WorkerSession,
     config?: Partial<WorkerConfig>
   ): Promise<WorkerSession> {
+    // Check in-memory first (same process, no restart needed)
     const existing = this.sessions.get(sessionId);
     if (existing) {
       existing.session.status = "active";
@@ -118,20 +120,42 @@ export class CopilotAdapter implements ProviderAdapter {
       return existing.session;
     }
 
-    // Copilot SDK does not currently support resuming sessions by ID after
-    // process restart. Start a fresh session with the same role context.
-    if (!config?.featureId || !config?.role) {
-      throw new Error("Cannot resume Copilot session: original config required to start fresh");
-    }
+    // Process restart: The Copilot SDK (technical preview) does not expose a
+    // cross-process session resume mechanism based on a stored session ID.
+    // We create a new SDK connection with the original role context and store it
+    // under the original session ID so the registry stays consistent.
+    //
+    // Conversation history is NOT restored by the SDK. Repo artefacts — the
+    // feature file, rolling review, and summaries — are the source of truth
+    // and should be used to reconstruct context in the system prompt or first
+    // message when this matters.
+    const client = await this.createClient();
+    await client.start();
 
-    return this.startSession({
-      role: config.role!,
-      provider: "copilot",
-      featureId: config.featureId!,
-      roleContent: config.roleContent,
-      epicId: config.epicId,
-      releaseId: config.releaseId,
+    const roleContent = config?.roleContent;
+    const systemPrompt = roleContent
+      ? roleContent + (config?.contextAddendum ? `\n\n${config.contextAddendum}` : "")
+      : undefined;
+
+    const copilotSession = await client.createSession({
+      onPermissionRequest: this.approveAll,
+      ...(systemPrompt ? { systemPrompt } : {}),
     });
+
+    const now = this.now();
+    const resumedSession: WorkerSession = {
+      ...storedSession,
+      status: "active",
+      updatedAt: now,
+      metadata: {
+        ...storedSession.metadata,
+        reconnectedAt: now,
+      },
+    };
+
+    // Store under original session ID — no ID change, registry stays consistent
+    this.sessions.set(sessionId, { clientInstance: client, copilotSession, session: resumedSession });
+    return resumedSession;
   }
 
   async sendMessage(

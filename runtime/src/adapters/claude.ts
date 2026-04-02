@@ -102,15 +102,31 @@ export class ClaudeAdapter implements ProviderAdapter {
 
   async resumeSession(
     sessionId: string,
+    storedSession: WorkerSession,
     _config?: Partial<WorkerConfig>
   ): Promise<WorkerSession> {
+    // Check in-memory first (same process, no restart needed)
     const existing = this.sessions.get(sessionId);
     if (existing) {
       existing.session.status = "active";
       existing.session.updatedAt = this.now();
       return existing.session;
     }
-    throw new Error(`Claude session ${sessionId} not found in memory.`);
+
+    // Process restart: rehydrate from stored session metadata.
+    // The Claude Agent SDK persists sessions as JSONL files on disk, keyed by
+    // claudeSessionId. Passing resume: claudeSessionId in the next query()
+    // call restores full conversation continuity.
+    this.rehydrateSession(storedSession);
+    const meta = this.sessions.get(sessionId);
+    if (!meta) {
+      throw new Error(
+        `Cannot resume Claude session ${sessionId}: missing claudeSessionId in stored metadata`
+      );
+    }
+    meta.session.status = "active";
+    meta.session.updatedAt = this.now();
+    return meta.session;
   }
 
   /** Rebuild an in-memory session handle from stored metadata (after registry reload). */

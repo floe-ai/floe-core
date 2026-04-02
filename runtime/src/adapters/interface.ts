@@ -27,10 +27,19 @@ export interface ProviderAdapter {
 
   /**
    * Resume an existing session by its session ID.
-   * Adapters that do not support native session persistence should
-   * reconstruct context from stored conversation history or metadata.
+   *
+   * `storedSession` is the full WorkerSession record from the registry — it carries
+   * provider-specific metadata (e.g. claudeSessionId, codexThreadId) that adapters
+   * need to reconnect after a process restart.
+   *
+   * Adapters that do not support native cross-process session persistence should
+   * create a fresh connection using the original role context from storedSession.
    */
-  resumeSession(sessionId: string, config?: Partial<WorkerConfig>): Promise<WorkerSession>;
+  resumeSession(
+    sessionId: string,
+    storedSession: WorkerSession,
+    config?: Partial<WorkerConfig>
+  ): Promise<WorkerSession>;
 
   /**
    * Send a message to an active session and return the response.

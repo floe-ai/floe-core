@@ -92,6 +92,7 @@ export class CodexAdapter implements ProviderAdapter {
 
   async resumeSession(
     sessionId: string,
+    storedSession: WorkerSession,
     _config?: Partial<WorkerConfig>
   ): Promise<WorkerSession> {
     const existing = this.sessions.get(sessionId);
@@ -101,10 +102,17 @@ export class CodexAdapter implements ProviderAdapter {
       return existing.session;
     }
 
-    // Session not in memory — need a thread ID to resume
-    throw new Error(
-      `Codex session ${sessionId} not found in memory. Provide the Codex thread ID to resume.`
-    );
+    // Process restart: use the Codex thread ID stored in metadata to reconnect.
+    // resumeThread(threadId) tells the SDK to continue the existing conversation
+    // thread on the OpenAI backend without replaying history locally.
+    const codexThreadId = storedSession.metadata?.codexThreadId as string | undefined;
+    if (!codexThreadId) {
+      throw new Error(
+        `Cannot resume Codex session ${sessionId}: no codexThreadId in stored metadata`
+      );
+    }
+
+    return this.resumeByThreadId(sessionId, codexThreadId, storedSession);
   }
 
   /** Resume using a Codex-native thread ID from stored metadata. */

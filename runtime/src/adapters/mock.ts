@@ -67,13 +67,24 @@ export class MockAdapter implements ProviderAdapter {
 
   async resumeSession(
     sessionId: string,
+    storedSession: WorkerSession,
     _config?: Partial<WorkerConfig>
   ): Promise<WorkerSession> {
     const state = this.sessions.get(sessionId);
-    if (!state) throw new Error(`Mock session not found: ${sessionId}`);
-    state.session.status = "active";
-    state.session.updatedAt = this.now();
-    return state.session;
+    if (state) {
+      state.session.status = "active";
+      state.session.updatedAt = this.now();
+      return state.session;
+    }
+
+    // Simulate a process restart: reconstruct in-memory state from the stored session.
+    const resumed: WorkerSession = {
+      ...storedSession,
+      status: "active",
+      updatedAt: this.now(),
+    };
+    this.sessions.set(sessionId, { session: resumed, messages: [] });
+    return resumed;
   }
 
   async sendMessage(
