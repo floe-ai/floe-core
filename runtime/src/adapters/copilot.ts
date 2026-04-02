@@ -1,14 +1,24 @@
 /**
  * Copilot provider adapter — uses @github/copilot-sdk.
  *
- * SDK reference: https://docs.github.com/en/copilot/how-tos/copilot-sdk
- * SDK repo: https://github.com/github/copilot-sdk
+ * SDK reference:  https://docs.github.com/en/copilot/how-tos/copilot-sdk
+ * SDK source:     https://github.com/github/copilot-sdk
+ * Getting started: https://github.com/github/copilot-sdk/blob/main/docs/getting-started.md
  *
- * Auth: Uses existing GitHub/Copilot CLI signed-in credentials automatically.
- * The CopilotClient picks up the local auth session (useLoggedInUser defaults to true).
- * No API key or env vars required for authenticated users.
+ * Auth: Uses existing GitHub/Copilot CLI credentials automatically.
+ * The CopilotClient picks up the local auth session. No API key required.
  *
- * Note: This SDK is in technical preview and may change.
+ * Session model:
+ *   - Sessions persist via "infinite sessions" (enabled by default), which stores
+ *     workspace state to a disk directory under session.workspacePath.
+ *   - Sessions can be resumed cross-process via client.resumeSession(sessionId, config).
+ *   - session.sessionId is a public property — always store this in metadata.
+ *
+ * Streaming:
+ *   - Must set streaming: true in createSession options to receive delta events.
+ *   - Delta events: assistant.message_delta with event.data.deltaContent
+ *   - Completion: session.idle fires when the response is ready.
+ *   - session.on() returns an unsubscribe function — there is no .off() method.
  */
 
 import type { ProviderAdapter } from "./interface.ts";
@@ -21,29 +31,55 @@ import type {
   EventHandlers,
 } from "../types.ts";
 
+// ── SDK type shapes (sourced from @github/copilot-sdk v0.2.0+) ──────────────
+
+type SessionEventHandler = (event: unknown) => void;
+
 interface CopilotSession {
+  /** SDK-assigned session identifier. Persist and use with client.resumeSession(). */
+  readonly sessionId: string;
+  /** Path to the persistent workspace directory for this session. */
+  readonly workspacePath?: string;
+  /** Send a prompt. Resolves when dispatch is complete; subscribe to events for the response. */
   send(options: { prompt: string }): Promise<void>;
-  on(event: string, callback: (event: unknown) => void): void;
-  off(event: string, callback: (event: unknown) => void): void;
+  /** Subscribe to all events or a specific event type. Returns an unsubscribe function. */
+  on(handler: SessionEventHandler): () => void;
+  on(eventType: string, handler: SessionEventHandler): () => void;
+  /** Disconnect from the session (preserves disk state for future resume). */
   disconnect(): Promise<void>;
-  [Symbol.asyncDispose]?(): Promise<void>;
 }
 
 interface CopilotClientApi {
+  /** Start the underlying Copilot CLI process. */
   start(): Promise<void>;
+  /** Stop the client and release all resources. */
   stop(): Promise<unknown[]>;
+  /** Create a new session. streaming: true enables assistant.message_delta events. */
   createSession(options: {
     model?: string;
-    onPermissionRequest?: (req: unknown) => Promise<boolean | string>;
-    systemPrompt?: string;
+    sessionId?: string;
+    streaming?: boolean;
+    infiniteSessions?: { enabled?: boolean };
+    onPermissionRequest: (req: unknown) => Promise<boolean | string>;
+    systemMessage?: { content: string };
+  }): Promise<CopilotSession>;
+  /** Resume a previously created session by its sessionId. */
+  resumeSession(sessionId: string, config: {
+    model?: string;
+    streaming?: boolean;
+    onPermissionRequest: (req: unknown) => Promise<boolean | string>;
   }): Promise<CopilotSession>;
 }
+
+// ── Internal session state ────────────────────────────────────────────────────
 
 interface CopilotSessionMeta {
   clientInstance: CopilotClientApi;
   copilotSession: CopilotSession;
   session: WorkerSession;
 }
+
+// ── Adapter ───────────────────────────────────────────────────────────────────
 
 export class CopilotAdapter implements ProviderAdapter {
   readonly provider = "copilot";
@@ -77,13 +113,17 @@ export class CopilotAdapter implements ProviderAdapter {
     const client = await this.createClient();
     await client.start();
 
-    const systemPrompt = config.roleContent
-      ? config.roleContent + (config.contextAddendum ? `\n\n${config.contextAddendum}` : "")
+    const systemMessage = config.roleContent
+      ? {
+          content: config.roleContent +
+            (config.contextAddendum ? `\n\n${config.contextAddendum}` : ""),
+        }
       : undefined;
 
     const copilotSession = await client.createSession({
+      streaming: true,
       onPermissionRequest: this.approveAll,
-      ...(systemPrompt ? { systemPrompt } : {}),
+      ...(systemMessage ? { systemMessage } : {}),
     });
 
     const id = this.generateId();
@@ -100,7 +140,11 @@ export class CopilotAdapter implements ProviderAdapter {
       roleContentPath: config.roleContentPath,
       createdAt: now,
       updatedAt: now,
-      metadata: {},
+      metadata: {
+        // Store the SDK session ID so we can resume cross-process
+        copilotSessionId: copilotSession.sessionId,
+        workspacePath: copilotSession.workspacePath,
+      },
     };
 
     this.sessions.set(id, { clientInstance: client, copilotSession, session });
@@ -110,7 +154,7 @@ export class CopilotAdapter implements ProviderAdapter {
   async resumeSession(
     sessionId: string,
     storedSession: WorkerSession,
-    config?: Partial<WorkerConfig>
+    _config?: Partial<WorkerConfig>
   ): Promise<WorkerSession> {
     // Check in-memory first (same process, no restart needed)
     const existing = this.sessions.get(sessionId);
@@ -120,26 +164,22 @@ export class CopilotAdapter implements ProviderAdapter {
       return existing.session;
     }
 
-    // Process restart: The Copilot SDK (technical preview) does not expose a
-    // cross-process session resume mechanism based on a stored session ID.
-    // We create a new SDK connection with the original role context and store it
-    // under the original session ID so the registry stays consistent.
-    //
-    // Conversation history is NOT restored by the SDK. Repo artefacts — the
-    // feature file, rolling review, and summaries — are the source of truth
-    // and should be used to reconstruct context in the system prompt or first
-    // message when this matters.
+    // Cross-process resume using the SDK's native resumeSession().
+    // Infinite sessions (enabled by default) persist the workspace to disk,
+    // so conversation context is restored on resume.
+    const copilotSessionId = storedSession.metadata?.copilotSessionId as string | undefined;
+    if (!copilotSessionId) {
+      throw new Error(
+        `Cannot resume Copilot session ${sessionId}: missing copilotSessionId in stored metadata`
+      );
+    }
+
     const client = await this.createClient();
     await client.start();
 
-    const roleContent = config?.roleContent;
-    const systemPrompt = roleContent
-      ? roleContent + (config?.contextAddendum ? `\n\n${config.contextAddendum}` : "")
-      : undefined;
-
-    const copilotSession = await client.createSession({
+    const copilotSession = await client.resumeSession(copilotSessionId, {
+      streaming: true,
       onPermissionRequest: this.approveAll,
-      ...(systemPrompt ? { systemPrompt } : {}),
     });
 
     const now = this.now();
@@ -149,11 +189,11 @@ export class CopilotAdapter implements ProviderAdapter {
       updatedAt: now,
       metadata: {
         ...storedSession.metadata,
-        reconnectedAt: now,
+        workspacePath: copilotSession.workspacePath ?? storedSession.metadata?.workspacePath,
+        resumedAt: now,
       },
     };
 
-    // Store under original session ID — no ID change, registry stays consistent
     this.sessions.set(sessionId, { clientInstance: client, copilotSession, session: resumedSession });
     return resumedSession;
   }
@@ -167,38 +207,32 @@ export class CopilotAdapter implements ProviderAdapter {
     if (!meta) throw new Error(`Copilot session not found: ${sessionId}`);
 
     return new Promise((resolve, reject) => {
-      const collected: string[] = [];
+      let content = "";
       const timeoutMs = options?.timeoutMs ?? 120_000;
-
-      const onMessage = (event: unknown) => {
-        const e = event as { data?: { content?: string } };
-        if (e?.data?.content) collected.push(e.data.content);
-      };
-
-      const onIdle = () => {
-        meta.copilotSession.off("assistant.message", onMessage);
-        meta.copilotSession.off("session.idle", onIdle);
-        meta.session.lastMessageAt = this.now();
-        meta.session.updatedAt = this.now();
-        clearTimeout(timer);
-        resolve({
-          sessionId,
-          content: collected.join(""),
-          finishReason: "stop",
-        });
-      };
+      let unsubscribe: (() => void) | null = null;
 
       const timer = setTimeout(() => {
-        meta.copilotSession.off("assistant.message", onMessage);
-        meta.copilotSession.off("session.idle", onIdle);
+        if (unsubscribe) unsubscribe();
         reject(new Error(`Copilot session ${sessionId} timed out after ${timeoutMs}ms`));
       }, timeoutMs);
 
-      meta.copilotSession.on("assistant.message", onMessage);
-      meta.copilotSession.on("session.idle", onIdle);
+      // session.on() returns an unsubscribe fn; there is no .off() method
+      unsubscribe = meta.copilotSession.on((event: unknown) => {
+        const e = event as { type?: string; data?: { content?: string } };
+        if (e?.type === "assistant.message" && e?.data?.content) {
+          content = e.data.content;
+        } else if (e?.type === "session.idle") {
+          clearTimeout(timer);
+          if (unsubscribe) unsubscribe();
+          meta.session.lastMessageAt = this.now();
+          meta.session.updatedAt = this.now();
+          resolve({ sessionId, content, finishReason: "stop" });
+        }
+      });
 
-      meta.copilotSession.send({ prompt: message }).catch((err) => {
+      meta.copilotSession.send({ prompt: message }).catch((err: unknown) => {
         clearTimeout(timer);
+        if (unsubscribe) unsubscribe();
         reject(err);
       });
     });
@@ -214,34 +248,30 @@ export class CopilotAdapter implements ProviderAdapter {
 
     return new Promise((resolve, reject) => {
       let fullContent = "";
+      let unsubscribe: (() => void) | null = null;
 
-      const onDelta = (event: unknown) => {
-        const e = event as { data?: { content?: string } };
-        const delta = e?.data?.content ?? "";
-        if (delta) {
-          fullContent += delta;
-          handlers.onDelta?.(delta, { type: "message_delta", sessionId, data: delta });
+      unsubscribe = meta.copilotSession.on((event: unknown) => {
+        const e = event as { type?: string; data?: { deltaContent?: string; content?: string } };
+        if (e?.type === "assistant.message_delta" && e?.data?.deltaContent) {
+          fullContent += e.data.deltaContent;
+          handlers.onDelta?.(e.data.deltaContent, {
+            type: "message_delta",
+            sessionId,
+            data: e.data.deltaContent,
+          });
+        } else if (e?.type === "session.idle") {
+          if (unsubscribe) unsubscribe();
+          meta.session.lastMessageAt = this.now();
+          meta.session.updatedAt = this.now();
+
+          const result: MessageResult = { sessionId, content: fullContent, finishReason: "stop" };
+          handlers.onComplete?.(result, { type: "message_complete", sessionId, data: result });
+          resolve();
         }
-      };
+      });
 
-      const onIdle = () => {
-        meta.copilotSession.off("assistant.message_delta", onDelta);
-        meta.copilotSession.off("assistant.message", onDelta);
-        meta.copilotSession.off("session.idle", onIdle);
-        meta.session.lastMessageAt = this.now();
-        meta.session.updatedAt = this.now();
-
-        const result: MessageResult = { sessionId, content: fullContent, finishReason: "stop" };
-        handlers.onComplete?.(result, { type: "message_complete", sessionId, data: result });
-        resolve();
-      };
-
-      // Subscribe to both delta and full message events (SDK may emit either)
-      meta.copilotSession.on("assistant.message_delta", onDelta);
-      meta.copilotSession.on("assistant.message", onDelta);
-      meta.copilotSession.on("session.idle", onIdle);
-
-      meta.copilotSession.send({ prompt: message }).catch((err) => {
+      meta.copilotSession.send({ prompt: message }).catch((err: unknown) => {
+        if (unsubscribe) unsubscribe();
         handlers.onError?.(String(err), { type: "error", sessionId, error: String(err) });
         reject(err);
       });

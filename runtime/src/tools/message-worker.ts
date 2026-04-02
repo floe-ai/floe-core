@@ -20,8 +20,22 @@ export function createMessageWorkerHandler(
     if (!adapter) return { ok: false, error: `No adapter for provider: ${stored.provider}` };
 
     const result = await adapter.sendMessage(input.sessionId, input.message);
-    registry.update(input.sessionId, { lastMessageAt: new Date().toISOString() });
+    const now = new Date().toISOString();
 
-    return { ok: true, sessionId: input.sessionId, content: result.content, finishReason: result.finishReason };
+    // Persist any metadata updates the adapter made (e.g. Codex thread ID captured
+    // from the first thread.started event, Copilot workspacePath updates).
+    const updated = registry.get(input.sessionId);
+    registry.update(input.sessionId, {
+      lastMessageAt: now,
+      metadata: updated?.metadata,
+    });
+
+    return {
+      ok: true,
+      sessionId: input.sessionId,
+      content: result.content,
+      finishReason: result.finishReason,
+      usage: result.usage,
+    };
   };
 }

@@ -1,11 +1,19 @@
 /**
  * Codex provider adapter — uses @openai/codex-sdk.
  *
- * Codex SDK reference: https://developers.openai.com/codex/sdk
+ * SDK reference: https://developers.openai.com/codex/sdk
+ * SDK source:    https://github.com/openai/codex/tree/main/sdk/typescript
  *
- * Auth: OPENAI_API_KEY env var, or local sign-in mode (both officially supported).
- * If OPENAI_API_KEY is not set, the SDK will attempt to use the local ChatGPT
- * sign-in session. This adapter does not manage auth centrally.
+ * Auth: OPENAI_API_KEY env var, or local ChatGPT sign-in (both officially supported).
+ *
+ * Session model:
+ *   - Threads persist to ~/.codex/sessions on disk.
+ *   - Thread IDs are assigned after the first run turn (thread.started event sets thread._id).
+ *   - Cross-process resume: codex.resumeThread(threadId, options) reconnects by ID.
+ *
+ * System prompt / role injection:
+ *   - ThreadOptions has no systemPrompt field. Role content is prepended to the
+ *     first message in the thread so the agent understands its role context.
  */
 
 import type { ProviderAdapter } from "./interface.ts";
@@ -18,21 +26,74 @@ import type {
   EventHandlers,
 } from "../types.ts";
 
+// ── SDK type shapes (sourced from openai/codex sdk/typescript/src/) ──────────
+
+interface CodexTurn {
+  finalResponse: string;
+  items: CodexThreadItem[];
+  usage: { input_tokens: number; output_tokens: number; cached_input_tokens?: number } | null;
+}
+
+interface CodexThreadItem {
+  id: string;
+  type: string;
+  text?: string;
+  command?: string;
+  status?: string;
+  [key: string]: unknown;
+}
+
+interface CodexThreadEvent {
+  type: string;
+  /** thread.started — thread ID assigned by the CLI */
+  thread_id?: string;
+  /** item.* events */
+  item?: CodexThreadItem;
+  /** turn.completed */
+  usage?: { input_tokens: number; output_tokens: number };
+  /** turn.failed / error */
+  error?: { message: string };
+  message?: string;
+}
+
+interface CodexStreamedTurn {
+  events: AsyncGenerator<CodexThreadEvent>;
+}
+
 interface CodexThread {
-  run(prompt: string): Promise<string>;
-  runStreamed?: (prompt: string) => AsyncIterable<{ type: string; delta?: string; content?: string }>;
+  /** Null until the first turn completes (populated from thread.started event). */
+  readonly id: string | null;
+  run(input: string, options?: Record<string, unknown>): Promise<CodexTurn>;
+  runStreamed(input: string, options?: Record<string, unknown>): Promise<CodexStreamedTurn>;
+}
+
+interface CodexThreadOptions {
+  model?: string;
+  sandboxMode?: string;
+  workingDirectory?: string;
+  skipGitRepoCheck?: boolean;
+  modelReasoningEffort?: string;
+  networkAccessEnabled?: boolean;
+  approvalPolicy?: string;
 }
 
 interface CodexClient {
-  startThread(options?: { systemPrompt?: string }): CodexThread & { id?: string };
-  resumeThread(threadId: string): CodexThread;
+  startThread(options?: CodexThreadOptions): CodexThread;
+  resumeThread(threadId: string, options?: CodexThreadOptions): CodexThread;
 }
+
+// ── Internal session state ────────────────────────────────────────────────────
 
 interface CodexSessionMeta {
   thread: CodexThread;
-  threadId?: string;
   session: WorkerSession;
+  /** Role content to inject into the first message turn. */
+  roleContent?: string;
+  /** True until the first message is sent (role content not yet injected). */
+  isFirstMessage: boolean;
 }
+
+// ── Adapter ───────────────────────────────────────────────────────────────────
 
 export class CodexAdapter implements ProviderAdapter {
   readonly provider = "codex";
@@ -43,9 +104,8 @@ export class CodexAdapter implements ProviderAdapter {
   private async getClient(): Promise<CodexClient> {
     if (this.codex) return this.codex;
     try {
-      // @openai/codex-sdk — install separately; treated as a peer dependency
       const { Codex } = await import("@openai/codex-sdk");
-      this.codex = new Codex();
+      this.codex = new Codex() as unknown as CodexClient;
       return this.codex;
     } catch {
       throw new Error(
@@ -64,14 +124,18 @@ export class CodexAdapter implements ProviderAdapter {
 
   async startSession(config: WorkerConfig): Promise<WorkerSession> {
     const client = await this.getClient();
-    const systemPrompt = config.roleContent
-      ? config.roleContent + (config.contextAddendum ? `\n\n${config.contextAddendum}` : "")
-      : undefined;
 
-    const thread = client.startThread(systemPrompt ? { systemPrompt } : undefined);
+    // ThreadOptions has no systemPrompt; role content is injected in the first message.
+    const thread = client.startThread({
+      workingDirectory: process.cwd(),
+      skipGitRepoCheck: true,
+      approvalPolicy: "on-request",
+    });
+
     const id = this.generateId();
     const now = this.now();
 
+    // thread.id is null at creation — populated after first run (thread.started event)
     const session: WorkerSession = {
       id,
       role: config.role,
@@ -83,10 +147,17 @@ export class CodexAdapter implements ProviderAdapter {
       roleContentPath: config.roleContentPath,
       createdAt: now,
       updatedAt: now,
-      metadata: { codexThreadId: (thread as any).id },
+      metadata: {},
     };
 
-    this.sessions.set(id, { thread, threadId: (thread as any).id, session });
+    this.sessions.set(id, {
+      thread,
+      session,
+      roleContent: config.roleContent
+        ? config.roleContent + (config.contextAddendum ? `\n\n${config.contextAddendum}` : "")
+        : undefined,
+      isFirstMessage: true,
+    });
     return session;
   }
 
@@ -102,38 +173,57 @@ export class CodexAdapter implements ProviderAdapter {
       return existing.session;
     }
 
-    // Process restart: use the Codex thread ID stored in metadata to reconnect.
-    // resumeThread(threadId) tells the SDK to continue the existing conversation
-    // thread on the OpenAI backend without replaying history locally.
+    // Process restart: reconnect to existing Codex thread using stored thread ID.
+    // Threads persist to ~/.codex/sessions and survive process restarts.
     const codexThreadId = storedSession.metadata?.codexThreadId as string | undefined;
     if (!codexThreadId) {
       throw new Error(
-        `Cannot resume Codex session ${sessionId}: no codexThreadId in stored metadata`
+        `Cannot resume Codex session ${sessionId}: no codexThreadId in stored metadata. ` +
+        `The session must have completed at least one message turn before being resumable.`
       );
     }
 
-    return this.resumeByThreadId(sessionId, codexThreadId, storedSession);
-  }
-
-  /** Resume using a Codex-native thread ID from stored metadata. */
-  async resumeByThreadId(
-    sessionId: string,
-    codexThreadId: string,
-    originalSession: WorkerSession
-  ): Promise<WorkerSession> {
     const client = await this.getClient();
-    const thread = client.resumeThread(codexThreadId);
-    const now = this.now();
+    const thread = client.resumeThread(codexThreadId, {
+      workingDirectory: process.cwd(),
+      skipGitRepoCheck: true,
+      approvalPolicy: "on-request",
+    });
 
-    const session: WorkerSession = {
-      ...originalSession,
+    const now = this.now();
+    const resumedSession: WorkerSession = {
+      ...storedSession,
       status: "active",
       updatedAt: now,
-      metadata: { codexThreadId },
     };
 
-    this.sessions.set(sessionId, { thread, threadId: codexThreadId, session });
-    return session;
+    // Role content not needed for resumed threads — context is in the persisted thread.
+    this.sessions.set(sessionId, {
+      thread,
+      session: resumedSession,
+      isFirstMessage: false,
+    });
+    return resumedSession;
+  }
+
+  /** Build the actual message string, prepending role content on the first turn. */
+  private buildMessage(meta: CodexSessionMeta, message: string): string {
+    if (meta.isFirstMessage && meta.roleContent) {
+      meta.isFirstMessage = false;
+      return `${meta.roleContent}\n\n---\n\n${message}`;
+    }
+    return message;
+  }
+
+  /** Update session metadata with thread ID once it becomes available. */
+  private captureThreadId(meta: CodexSessionMeta): void {
+    const threadId = meta.thread.id;
+    if (threadId && !meta.session.metadata?.codexThreadId) {
+      meta.session.metadata = { ...meta.session.metadata, codexThreadId: threadId };
+      meta.session.updatedAt = this.now();
+      // Signal registry to persist the updated metadata
+      // (The registry.update call is made by the tool handler after sendMessage resolves)
+    }
   }
 
   async sendMessage(
@@ -144,14 +234,20 @@ export class CodexAdapter implements ProviderAdapter {
     const meta = this.sessions.get(sessionId);
     if (!meta) throw new Error(`Codex session not found: ${sessionId}`);
 
-    const content = await meta.thread.run(message);
+    const actualMessage = this.buildMessage(meta, message);
+    const turn = await meta.thread.run(actualMessage);
+
+    this.captureThreadId(meta);
     meta.session.lastMessageAt = this.now();
     meta.session.updatedAt = this.now();
 
     return {
       sessionId,
-      content: typeof content === "string" ? content : JSON.stringify(content),
+      content: turn.finalResponse,
       finishReason: "stop",
+      usage: turn.usage
+        ? { inputTokens: turn.usage.input_tokens, outputTokens: turn.usage.output_tokens }
+        : undefined,
     };
   }
 
@@ -163,30 +259,39 @@ export class CodexAdapter implements ProviderAdapter {
     const meta = this.sessions.get(sessionId);
     if (!meta) throw new Error(`Codex session not found: ${sessionId}`);
 
-    if (meta.thread.runStreamed) {
-      let fullContent = "";
-      for await (const event of meta.thread.runStreamed(message)) {
-        if (event.type === "delta" && event.delta) {
-          fullContent += event.delta;
-          handlers.onDelta?.(event.delta, { type: "message_delta", sessionId, data: event.delta });
+    const actualMessage = this.buildMessage(meta, message);
+    const { events } = await meta.thread.runStreamed(actualMessage);
+
+    let fullContent = "";
+
+    for await (const event of events) {
+      if (event.type === "thread.started" && event.thread_id) {
+        // Capture thread ID from the first event of the first turn
+        if (!meta.session.metadata?.codexThreadId) {
+          meta.session.metadata = { ...meta.session.metadata, codexThreadId: event.thread_id };
         }
+      } else if (event.type === "item.completed" && event.item?.type === "agent_message") {
+        const text = (event.item.text ?? "") as string;
+        fullContent += text;
+        if (text) {
+          handlers.onDelta?.(text, { type: "message_delta", sessionId, data: text });
+        }
+      } else if (event.type === "turn.failed") {
+        const errMsg = event.error?.message ?? "Codex turn failed";
+        handlers.onError?.(errMsg, { type: "error", sessionId, error: errMsg });
+        return;
+      } else if (event.type === "error") {
+        const errMsg = event.message ?? "Codex stream error";
+        handlers.onError?.(errMsg, { type: "error", sessionId, error: errMsg });
+        return;
       }
-      meta.session.lastMessageAt = this.now();
-      meta.session.updatedAt = this.now();
-
-      const result: MessageResult = { sessionId, content: fullContent, finishReason: "stop" };
-      handlers.onComplete?.(result, { type: "message_complete", sessionId, data: result });
-    } else {
-      // Fallback: non-streaming run, emit as single complete event
-      const content = await meta.thread.run(message);
-      const strContent = typeof content === "string" ? content : JSON.stringify(content);
-      meta.session.lastMessageAt = this.now();
-      meta.session.updatedAt = this.now();
-
-      const result: MessageResult = { sessionId, content: strContent, finishReason: "stop" };
-      handlers.onDelta?.(strContent, { type: "message_delta", sessionId, data: strContent });
-      handlers.onComplete?.(result, { type: "message_complete", sessionId, data: result });
     }
+
+    meta.session.lastMessageAt = this.now();
+    meta.session.updatedAt = this.now();
+
+    const result: MessageResult = { sessionId, content: fullContent, finishReason: "stop" };
+    handlers.onComplete?.(result, { type: "message_complete", sessionId, data: result });
   }
 
   async getStatus(sessionId: string): Promise<WorkerStatus> {
