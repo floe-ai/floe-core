@@ -43,11 +43,4 @@ bun run scripts/validate.ts all
 
 ## Runtime
 
-The floe-runtime MCP server is started separately:
-
-```bash
-cd runtime
-bun run src/server.ts
-```
-
-Once running, it exposes tools for managing worker sessions (launch_worker, message_worker, etc.).
+The floe-runtime MCP server auto-starts when Codex loads its config from `.codex/config.toml`. It exposes tools for managing worker sessions (launch_worker, message_worker, etc.).
