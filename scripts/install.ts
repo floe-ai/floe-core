@@ -3,17 +3,29 @@
  * floe-exec installer — invoked via:
  *   bunx github:floe-ai/floe-core
  *
- * Copies the floe-exec skill and agent definitions into one or more
- * agent client directories. Optionally scaffolds the delivery structure.
+ * Single-step install: copies skill + agent definitions, scaffolds the
+ * delivery structure, installs runtime dependencies, and registers the
+ * MCP server for each provider. The MCP server auto-starts when the
+ * provider loads its config — no manual server start needed.
  *
- * Prerequisites: bun, git
+ * Flags:
+ *   --project-root <path>  Target project (default: cwd)
+ *   --target <clients>     Comma-separated: codex,copilot,claude (default: all)
+ *   --force                Overwrite existing installations
+ *   --no-scaffold          Skip delivery/docs/.ai directory creation
+ *   --validate             Run consistency checks after install
+ *   --yes / -y             Skip confirmation prompt
+ *   --non-interactive      No prompts (implies --yes)
+ *
+ * Prerequisites: bun ≥ 1.0
  */
 
 import { existsSync, mkdirSync, rmSync, cpSync, writeFileSync, readFileSync } from "node:fs";
-import { resolve, join } from "node:path";
+import { resolve, join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { homedir } from "node:os";
 import { parseArgs } from "node:util";
+import { execSync } from "node:child_process";
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -112,7 +124,6 @@ function installAgents(client: Client, projectRoot: string, force: boolean): str
   const targetDir = agentTargetDir(client, projectRoot);
 
   if (client === "codex") {
-    // Codex: copy AGENTS.md to project root
     const source = join(sourceDir, "AGENTS.md");
     const dest = join(targetDir, "AGENTS.md");
     if (existsSync(dest) && !force) {
@@ -122,22 +133,13 @@ function installAgents(client: Client, projectRoot: string, force: boolean): str
     cpSync(source, dest);
     return dest;
   } else {
-    // Copilot/Claude: copy agent files to agents directory
     copyDir(sourceDir, targetDir, force);
     return targetDir;
   }
 }
 
 function registerMcpServer(client: Client, projectRoot: string, runtimePath: string): void {
-  const mcpEntry = {
-    type: "stdio",
-    command: "bun",
-    args: ["run", runtimePath],
-    env: {},
-  };
-
   if (client === "copilot") {
-    // Copilot: project-local .github/copilot-mcp.json
     const mcpConfigPath = join(projectRoot, ".github", "copilot-mcp.json");
     mkdirSync(join(mcpConfigPath, ".."), { recursive: true });
     let existing: any = {};
@@ -145,11 +147,15 @@ function registerMcpServer(client: Client, projectRoot: string, runtimePath: str
       try { existing = JSON.parse(readFileSync(mcpConfigPath, "utf-8")); } catch {}
     }
     existing.mcpServers = existing.mcpServers ?? {};
-    existing.mcpServers["floe-runtime"] = mcpEntry;
+    existing.mcpServers["floe-runtime"] = {
+      type: "stdio",
+      command: "bun",
+      args: ["run", runtimePath],
+      env: {},
+    };
     writeFileSync(mcpConfigPath, JSON.stringify(existing, null, 2), "utf-8");
 
   } else if (client === "claude") {
-    // Claude: project-local .claude/settings.json
     const settingsPath = join(projectRoot, ".claude", "settings.json");
     mkdirSync(join(settingsPath, ".."), { recursive: true });
     let existing: any = {};
@@ -157,31 +163,43 @@ function registerMcpServer(client: Client, projectRoot: string, runtimePath: str
       try { existing = JSON.parse(readFileSync(settingsPath, "utf-8")); } catch {}
     }
     existing.mcpServers = existing.mcpServers ?? {};
-    existing.mcpServers["floe-runtime"] = mcpEntry;
+    existing.mcpServers["floe-runtime"] = {
+      type: "stdio",
+      command: "bun",
+      args: ["run", runtimePath],
+      env: {},
+    };
     writeFileSync(settingsPath, JSON.stringify(existing, null, 2), "utf-8");
 
   } else if (client === "codex") {
-    // Codex: no project-local MCP config equivalent in v1.
-    // Print manual setup instructions.
-    console.log(`
-  ────────────────────────────────────────────────────────
-  Codex MCP setup (manual):
-  
-  Codex does not currently support project-local MCP config files.
-  To use floe-runtime with Codex, add the following to your
-  Codex CLI configuration (~/.codex/config.toml) manually:
-  
-  [[mcp_servers]]
-  name = "floe-runtime"
-  type = "stdio"
-  command = "bun"
-  args = ["run", "${runtimePath}"]
-  
-  Reference: https://developers.openai.com/codex/mcp
-  ────────────────────────────────────────────────────────
-`);
+    // Codex: project-local .codex/config.toml
+    const codexDir = join(projectRoot, ".codex");
+    const configPath = join(codexDir, "config.toml");
+    mkdirSync(codexDir, { recursive: true });
+
+    const mcpBlock = [
+      "",
+      `[mcp_servers.floe-runtime]`,
+      `command = "bun"`,
+      `args = ["run", "${runtimePath}"]`,
+      `enabled = true`,
+      "",
+    ].join("\n");
+
+    if (existsSync(configPath)) {
+      const content = readFileSync(configPath, "utf-8");
+      if (content.includes("[mcp_servers.floe-runtime]")) {
+        // Already registered — leave it alone
+        return;
+      }
+      writeFileSync(configPath, content + mcpBlock, "utf-8");
+    } else {
+      writeFileSync(configPath, mcpBlock.trimStart(), "utf-8");
+    }
   }
 }
+
+// ── Scaffold ──────────────────────────────────────────────────────────
 
 function scaffoldProject(projectRoot: string): string[] {
   const created: string[] = [];
@@ -208,7 +226,62 @@ function scaffoldProject(projectRoot: string): string[] {
     created.push(".ai/.gitignore");
   }
 
+  // Initialise runtime state if not present
+  const stateFile = join(projectRoot, ".ai", "state", "current.json");
+  if (!existsSync(stateFile)) {
+    writeFileSync(
+      stateFile,
+      JSON.stringify({
+        mode: "idle",
+        activeReleaseId: null,
+        activeEpicId: null,
+        activeFeatureId: null,
+        continuationPreference: "stop_after_feature",
+        updatedAt: new Date().toISOString(),
+      }, null, 2) + "\n",
+      "utf-8"
+    );
+    created.push(".ai/state/current.json");
+  }
+
   return created;
+}
+
+// ── Runtime dependency install ────────────────────────────────────────
+
+function installRuntimeDeps(): boolean {
+  const runtimeDir = join(PACKAGE_ROOT, "runtime");
+  if (!existsSync(join(runtimeDir, "package.json"))) return false;
+
+  try {
+    execSync("bun install --frozen-lockfile 2>/dev/null || bun install", {
+      cwd: runtimeDir,
+      stdio: "pipe",
+      timeout: 60_000,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ── Validate ──────────────────────────────────────────────────────────
+
+function runValidation(projectRoot: string): { ok: boolean; output: string } {
+  const validateScript = join(PACKAGE_ROOT, "skills", SKILL_NAME, "scripts", "validate.ts");
+  if (!existsSync(validateScript)) {
+    return { ok: false, output: "validate.ts not found" };
+  }
+
+  try {
+    const result = execSync(
+      `bun run "${validateScript}" all`,
+      { cwd: projectRoot, stdio: "pipe", timeout: 30_000 }
+    );
+    return { ok: true, output: result.toString("utf-8") };
+  } catch (err: any) {
+    return { ok: false, output: err.stdout?.toString("utf-8") ?? err.message };
+  }
 }
 
 // ── CLI entry point ───────────────────────────────────────────────────
@@ -220,8 +293,9 @@ async function main() {
       target: { type: "string" },
       "project-root": { type: "string" },
       force: { type: "boolean", default: false },
-      yes: { type: "boolean", default: false },
-      scaffold: { type: "boolean", default: false },
+      yes: { type: "boolean", short: "y", default: false },
+      "no-scaffold": { type: "boolean", default: false },
+      validate: { type: "boolean", default: false },
       "non-interactive": { type: "boolean", default: false },
     },
     allowPositionals: true,
@@ -229,6 +303,9 @@ async function main() {
   });
 
   const nonInteractive = Boolean(values["non-interactive"]);
+  const shouldScaffold = !values["no-scaffold"];
+  const shouldValidate = Boolean(values["validate"]);
+  const force = Boolean(values["force"]);
   const projectRoot = resolve(
     (values["project-root"] as string | undefined) ?? process.cwd()
   );
@@ -246,19 +323,19 @@ async function main() {
     } else {
       clients =
         values["target"] != null
-          ? (values["target"].split(",").map((t) => t.trim().toLowerCase()) as Client[])
+          ? ((values["target"] as string).split(",").map((t) => t.trim().toLowerCase()) as Client[])
           : await selectClients(rl);
     }
 
     // Confirm
-    if (!values["yes"] && process.stdout.isTTY) {
+    if (!values["yes"] && !nonInteractive && process.stdout.isTTY) {
       console.log(`\n  floe-exec will be installed for:\n`);
       for (const c of clients) {
         console.log(`    ${c.padEnd(10)}  skill → ${shortPath(skillTargetDir(c, projectRoot))}`);
         console.log(`    ${" ".repeat(10)}  agents → ${shortPath(agentTargetDir(c, projectRoot))}`);
       }
-      if (values["scaffold"]) console.log("\n  Project structure will be scaffolded.");
-      if (values["force"]) console.log("  Existing installations will be replaced (--force).");
+      if (shouldScaffold) console.log("\n  Project structure will be scaffolded.");
+      if (force) console.log("  Existing installations will be replaced (--force).");
       console.log("");
       const ok = await confirm(rl, "Proceed?");
       if (!ok) {
@@ -267,49 +344,70 @@ async function main() {
       }
     }
 
-    // Install
-    const results: { client: Client; skill: string; agents: string; status: string }[] = [];
+    console.log("");
+
+    // ── Step 1: Install skill + agents per client ─────────────────────
+
+    const results: { client: Client; status: string }[] = [];
+    const runtimeServerPath = join(PACKAGE_ROOT, "runtime", "src", "server.ts");
 
     for (const c of clients) {
       try {
-        const skillPath = installSkill(c, projectRoot, Boolean(values["force"]));
-        const agentPath = installAgents(c, projectRoot, Boolean(values["force"]));
-
-        // Register floe-runtime MCP server project-locally
-        const runtimeServerPath = join(PACKAGE_ROOT, "runtime", "src", "server.ts");
+        installSkill(c, projectRoot, force);
+        installAgents(c, projectRoot, force);
         registerMcpServer(c, projectRoot, runtimeServerPath);
-
-        results.push({ client: c, skill: skillPath, agents: agentPath, status: "installed" });
-        console.log(`  ✓ ${c.padEnd(10)} → skill + agents installed`);
+        results.push({ client: c, status: "ok" });
+        console.log(`  ✓ ${c}`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        results.push({ client: c, skill: "", agents: "", status: `failed: ${msg}` });
-        console.error(`  ✗ ${c.padEnd(10)} → ${msg}`);
+        results.push({ client: c, status: `failed: ${msg}` });
+        console.error(`  ✗ ${c} — ${msg}`);
       }
     }
 
-    // Scaffold if requested
+    // ── Step 2: Scaffold project structure ────────────────────────────
+
     let scaffolded: string[] = [];
-    if (values["scaffold"]) {
+    if (shouldScaffold) {
       scaffolded = scaffoldProject(projectRoot);
       if (scaffolded.length > 0) {
-        console.log(`\n  Scaffolded ${scaffolded.length} directories`);
+        console.log(`  ✓ scaffolded ${scaffolded.length} directories`);
       } else {
-        console.log("\n  Project structure already exists");
+        console.log(`  ✓ project structure already present`);
       }
     }
+
+    // ── Step 3: Install runtime dependencies ─────────────────────────
+
+    const depsOk = installRuntimeDeps();
+    if (depsOk) {
+      console.log(`  ✓ runtime dependencies installed`);
+    } else {
+      console.log(`  ⚠ runtime dependencies skipped (run 'bun install' in runtime/ manually)`);
+    }
+
+    // ── Step 4: Validate (optional) ──────────────────────────────────
+
+    if (shouldValidate) {
+      const validation = runValidation(projectRoot);
+      if (validation.ok) {
+        console.log(`  ✓ validation passed`);
+      } else {
+        console.log(`  ⚠ validation issues found:`);
+        console.log(validation.output);
+      }
+    }
+
+    // ── Summary ──────────────────────────────────────────────────────
 
     const failures = results.filter((r) => r.status.startsWith("failed"));
     if (failures.length > 0) {
-      console.error(`\n${failures.length} installation(s) failed.`);
+      console.error(`\n✗ ${failures.length} installation(s) failed.`);
       process.exit(1);
     }
 
-    console.log(`\n✓ ${results.length} installation(s) complete.`);
-    if (!values["scaffold"]) {
-      console.log("  Run with --scaffold to also create delivery/ and .ai/ directories.");
-    }
-    console.log("  Agents can now use the floe-exec skill for structured delivery.");
+    console.log(`\n✓ floe-exec installed. Open your agent (codex, claude, or copilot) to start.`);
+    console.log(`  The MCP server auto-starts when the provider loads its config — no manual setup needed.\n`);
   } finally {
     rl.close();
   }

@@ -57,39 +57,20 @@ floe-mem (optional, separate)
 ### 1. Install
 
 ```bash
-# Clone and install into your project
-git clone https://github.com/floe-ai/floe-core.git
-cd floe-core
-bun run scripts/install.ts --project-root /path/to/your/project --scaffold
+bunx github:floe-ai/floe-core --project-root /path/to/your/project
 ```
 
-Or run directly:
-```bash
-bunx github:floe-ai/floe-core --scaffold
-```
+This single command:
+- Copies skill + agent definitions for all three providers
+- Scaffolds `delivery/`, `docs/`, and `.ai/` directories
+- Installs runtime dependencies
+- Registers the MCP server in each provider's project-local config
 
-### 2. Start the runtime MCP server
+Add `--validate` to run consistency checks after install. Use `--no-scaffold` to skip directory creation. Use `--target codex,claude` to install for specific providers only.
 
-```bash
-cd floe-core/runtime
-bun install
-bun run src/server.ts
-```
+### 2. Open your agent
 
-The server communicates over stdio. Connect it to your agent's MCP config (auto-configured for Copilot and Claude by the installer; manual setup required for Codex).
-
-### 3. Initialise delivery structure
-
-```bash
-cd your-project
-# If not already scaffolded by installer:
-cd path/to/floe-core/skills/floe-exec
-bun run scripts/init.ts
-```
-
-### 4. Open your agent
-
-Start `claude`, `codex`, or Copilot CLI in your project. The Foreman agent definition will be loaded automatically.
+Start `claude`, `codex`, or Copilot CLI in your project. The Foreman is loaded automatically and the MCP server auto-starts when the provider invokes a tool — no manual server launch needed.
 
 ---
 
@@ -137,7 +118,7 @@ If [`floe-mem`](https://github.com/floe-ai/floe-mem) (context-memory skill) is i
 
 Detect availability:
 ```bash
-bun run scripts/init.ts  # reports floe-mem status during init
+bun run skills/floe-exec/scripts/init.ts  # reports floe-mem status
 ```
 
 ---
@@ -165,8 +146,11 @@ your-project/
 │   ├── skills/floe-exec/  skill installation (Copilot)
 │   ├── agents/foreman.agent.md
 │   └── copilot-mcp.json   MCP server registration
-└── .claude/
-    ├── skills/floe-exec/  skill installation (Claude)
-    ├── agents/foreman.md
-    └── settings.json      MCP server registration
+├── .claude/
+│   ├── skills/floe-exec/  skill installation (Claude)
+│   ├── agents/foreman.md
+│   └── settings.json      MCP server registration
+├── .codex/
+│   └── config.toml        MCP server registration (Codex)
+└── AGENTS.md              Codex foreman agent definition
 ```
