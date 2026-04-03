@@ -15,16 +15,23 @@
     "zod": "^3.22.0"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0"
+    "@types/node": "^20.0.0",
+    "bun-types": "^1.3.11"
   },
   "peerDependencies": {
-    "@openai/codex": "*",
-    "@anthropic-ai/sdk": "*",
+    "@openai/codex-sdk": "*",
+    "@anthropic-ai/claude-agent-sdk": "*",
     "@github/copilot-sdk": "*"
   },
   "peerDependenciesMeta": {
-    "@openai/codex": { "optional": true },
-    "@anthropic-ai/sdk": { "optional": true },
-    "@github/copilot-sdk": { "optional": true }
+    "@openai/codex-sdk": {
+      "optional": true
+    },
+    "@anthropic-ai/claude-agent-sdk": {
+      "optional": true
+    },
+    "@github/copilot-sdk": {
+      "optional": true
+    }
   }
 }

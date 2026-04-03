@@ -2,13 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://floe.ai/schemas/worker-session.json",
   "title": "Worker Session",
-  "description": "A single worker session entry in the runtime session registry. Lives under .ai/state/sessions.json.",
+  "description": "A single worker session entry in the runtime session registry. Lives under .ai/state/sessions.json. This is runtime bookkeeping only — not the durable source of truth.",
   "type": "object",
-  "required": ["id", "role", "provider", "status", "feature_id", "created_at"],
+  "required": ["id", "role", "provider", "status", "featureId", "createdAt"],
   "properties": {
     "id": {
       "type": "string",
-      "description": "Unique session identifier (e.g. sess-abc123)"
+      "description": "Unique session identifier (e.g. mock-abc123-xyz)"
     },
     "role": {
       "type": "string",
@@ -20,44 +20,40 @@
       "enum": ["codex", "claude", "copilot", "mock"],
       "description": "Provider runtime backing this session"
     },
-    "provider_session_id": {
-      "type": "string",
-      "description": "Provider-native session/thread ID (if available)"
-    },
     "status": {
       "type": "string",
       "enum": ["starting", "active", "idle", "stopped", "failed"],
       "description": "Current lifecycle status"
     },
-    "feature_id": {
+    "featureId": {
       "type": "string",
       "description": "The feature this session is scoped to"
     },
-    "epic_id": {
+    "epicId": {
       "type": "string",
       "description": "The epic containing the feature (denormalised for convenience)"
     },
-    "release_id": {
+    "releaseId": {
       "type": "string",
       "description": "The release containing the epic (denormalised for convenience)"
     },
-    "role_content_path": {
+    "roleContentPath": {
       "type": "string",
       "description": "Path to the canonical role definition injected at session start"
     },
-    "created_at": {
+    "createdAt": {
       "type": "string",
       "format": "date-time"
     },
-    "updated_at": {
+    "updatedAt": {
       "type": "string",
       "format": "date-time"
     },
-    "stopped_at": {
+    "stoppedAt": {
       "type": "string",
       "format": "date-time"
     },
-    "last_message_at": {
+    "lastMessageAt": {
       "type": "string",
       "format": "date-time"
     },

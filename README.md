@@ -126,7 +126,7 @@ bun run scripts/sessions.ts active                    # list active workers
 
 - Not a daemon or separate runtime product
 - Not a replacement for your coding agent — it runs inside it
-- Not a source of truth for session state (that's `.ai/state/sessions.json`)
+- Not a source of truth — `.ai/state/sessions.json` is runtime bookkeeping only; delivery artefacts are the durable truth
 - Not a workflow database
 
 ---

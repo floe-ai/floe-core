@@ -3,6 +3,7 @@
  *
  * SDK reference: https://developers.openai.com/codex/sdk
  * SDK source:    https://github.com/openai/codex/tree/main/sdk/typescript
+ * SDK package:   @openai/codex-sdk (v0.116.x)
  *
  * Auth: OPENAI_API_KEY env var, or local ChatGPT sign-in (both officially supported).
  *
@@ -14,6 +15,9 @@
  * System prompt / role injection:
  *   - ThreadOptions has no systemPrompt field. Role content is prepended to the
  *     first message in the thread so the agent understands its role context.
+ *
+ * Type shapes below are sourced from the SDK's TypeScript declarations.
+ * If the SDK introduces breaking changes, update these shapes to match.
  */
 
 import type { ProviderAdapter } from "./interface.ts";
@@ -26,7 +30,7 @@ import type {
   EventHandlers,
 } from "../types.ts";
 
-// ── SDK type shapes (sourced from openai/codex sdk/typescript/src/) ──────────
+// ── SDK type shapes (sourced from @openai/codex-sdk v0.116.x) ───────────────
 
 interface CodexTurn {
   finalResponse: string;
@@ -104,6 +108,7 @@ export class CodexAdapter implements ProviderAdapter {
   private async getClient(): Promise<CodexClient> {
     if (this.codex) return this.codex;
     try {
+      // @ts-ignore — optional peer dependency, dynamically imported
       const { Codex } = await import("@openai/codex-sdk");
       this.codex = new Codex() as unknown as CodexClient;
       return this.codex;

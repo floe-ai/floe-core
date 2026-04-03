@@ -2,8 +2,11 @@
 /**
  * floe-exec sessions — worker session registry CRUD.
  *
- * Manages .ai/state/sessions.json — the source of truth for active and historical
- * worker sessions. This is the write side; floe-runtime registry.ts also reads this file.
+ * Manages .ai/state/sessions.json — runtime bookkeeping for active and
+ * historical worker sessions. This is NOT the durable source of truth.
+ * floe-runtime registry.ts also reads/writes this file.
+ *
+ * Field naming: camelCase throughout, matching the runtime TypeScript types.
  *
  * Usage:
  *   bun run scripts/sessions.ts register --role <role> --provider <provider> --feature <id>
@@ -27,9 +30,53 @@ const ROLES = ["foreman", "planner", "implementer", "reviewer"] as const;
 const PROVIDERS = ["codex", "claude", "copilot", "mock"] as const;
 const STATUSES = ["starting", "active", "idle", "stopped", "failed"] as const;
 
+/** Normalise any legacy snake_case fields to camelCase. */
+function normaliseSession(s: any): any {
+  if (s.feature_id !== undefined && s.featureId === undefined) {
+    s.featureId = s.feature_id;
+    delete s.feature_id;
+  }
+  if (s.epic_id !== undefined && s.epicId === undefined) {
+    s.epicId = s.epic_id;
+    delete s.epic_id;
+  }
+  if (s.release_id !== undefined && s.releaseId === undefined) {
+    s.releaseId = s.release_id;
+    delete s.release_id;
+  }
+  if (s.role_content_path !== undefined && s.roleContentPath === undefined) {
+    s.roleContentPath = s.role_content_path;
+    delete s.role_content_path;
+  }
+  if (s.provider_session_id !== undefined) {
+    s.metadata = s.metadata ?? {};
+    s.metadata.providerSessionId = s.provider_session_id;
+    delete s.provider_session_id;
+  }
+  if (s.created_at !== undefined && s.createdAt === undefined) {
+    s.createdAt = s.created_at;
+    delete s.created_at;
+  }
+  if (s.updated_at !== undefined && s.updatedAt === undefined) {
+    s.updatedAt = s.updated_at;
+    delete s.updated_at;
+  }
+  if (s.stopped_at !== undefined && s.stoppedAt === undefined) {
+    s.stoppedAt = s.stopped_at;
+    delete s.stopped_at;
+  }
+  if (s.last_message_at !== undefined && s.lastMessageAt === undefined) {
+    s.lastMessageAt = s.last_message_at;
+    delete s.last_message_at;
+  }
+  return s;
+}
+
 function loadRegistry(): { sessions: any[] } {
   if (!existsSync(sessionsFile)) return { sessions: [] };
-  return readJson(sessionsFile);
+  const raw = readJson(sessionsFile);
+  raw.sessions = (raw.sessions ?? []).map(normaliseSession);
+  return raw;
 }
 
 function saveRegistry(registry: { sessions: any[] }): void {
@@ -46,8 +93,6 @@ const { values, positionals } = parseArgs({
     release: { type: "string" },
     status: { type: "string" },
     data: { type: "string" },
-    "provider-session-id": { type: "string" },
-    "role-content-path": { type: "string" },
   },
   allowPositionals: true,
   strict: false,
@@ -70,22 +115,18 @@ switch (cmd) {
     if (!featureId) fail("--feature is required");
 
     const now = timestamp();
-    const session = {
+    const session: Record<string, unknown> = {
       id: generateId("sess", `${role}-${featureId}-${Date.now().toString(36)}`),
       role,
       provider,
-      provider_session_id: (values["provider-session-id"] as string) ?? undefined,
       status: "starting",
-      feature_id: featureId,
-      epic_id: (values.epic as string) ?? undefined,
-      release_id: (values.release as string) ?? undefined,
-      role_content_path: (values["role-content-path"] as string) ?? undefined,
-      created_at: now,
-      updated_at: now,
+      featureId,
+      createdAt: now,
+      updatedAt: now,
     };
 
-    // Strip undefined fields
-    Object.keys(session).forEach((k) => (session as any)[k] === undefined && delete (session as any)[k]);
+    if (values.epic) session.epicId = values.epic;
+    if (values.release) session.releaseId = values.release;
 
     const registry = loadRegistry();
     registry.sessions.push(session);
@@ -113,7 +154,7 @@ switch (cmd) {
     const idx = registry.sessions.findIndex((s) => s.id === arg1);
     if (idx === -1) fail(`Session not found: ${arg1}`);
 
-    registry.sessions[idx] = { ...registry.sessions[idx], ...patch, id: arg1, updated_at: timestamp() };
+    registry.sessions[idx] = { ...registry.sessions[idx], ...patch, id: arg1, updatedAt: timestamp() };
     saveRegistry(registry);
     ok(`Updated session: ${arg1}`, { session: registry.sessions[idx] });
     break;
@@ -131,8 +172,8 @@ switch (cmd) {
     if (idx === -1) fail(`Session not found: ${arg1}`);
 
     registry.sessions[idx].status = newStatus;
-    registry.sessions[idx].updated_at = timestamp();
-    if (newStatus === "stopped") registry.sessions[idx].stopped_at = timestamp();
+    registry.sessions[idx].updatedAt = timestamp();
+    if (newStatus === "stopped") registry.sessions[idx].stoppedAt = timestamp();
     saveRegistry(registry);
     ok(`Status set to ${newStatus} for ${arg1}`);
     break;
@@ -145,8 +186,8 @@ switch (cmd) {
     if (idx === -1) fail(`Session not found: ${arg1}`);
 
     registry.sessions[idx].status = "stopped";
-    registry.sessions[idx].stopped_at = timestamp();
-    registry.sessions[idx].updated_at = timestamp();
+    registry.sessions[idx].stoppedAt = timestamp();
+    registry.sessions[idx].updatedAt = timestamp();
     saveRegistry(registry);
     ok(`Session deactivated: ${arg1}`);
     break;
@@ -156,7 +197,7 @@ switch (cmd) {
     const registry = loadRegistry();
     let sessions = registry.sessions;
 
-    if (values.feature) sessions = sessions.filter((s) => s.feature_id === values.feature);
+    if (values.feature) sessions = sessions.filter((s) => s.featureId === values.feature);
     if (values.role) sessions = sessions.filter((s) => s.role === values.role);
     if (values.status) sessions = sessions.filter((s) => s.status === values.status);
 
@@ -168,9 +209,9 @@ switch (cmd) {
         role: s.role,
         provider: s.provider,
         status: s.status,
-        feature_id: s.feature_id,
-        created_at: s.created_at,
-        updated_at: s.updated_at,
+        featureId: s.featureId,
+        createdAt: s.createdAt,
+        updatedAt: s.updatedAt,
       })),
     });
     break;
@@ -179,12 +220,12 @@ switch (cmd) {
   case "active": {
     const registry = loadRegistry();
     let sessions = registry.sessions.filter((s) => ["starting", "active", "idle"].includes(s.status));
-    if (values.feature) sessions = sessions.filter((s) => s.feature_id === values.feature);
+    if (values.feature) sessions = sessions.filter((s) => s.featureId === values.feature);
     output({
       ok: true,
       count: sessions.length,
       sessions: sessions.map((s) => ({
-        id: s.id, role: s.role, provider: s.provider, status: s.status, feature_id: s.feature_id,
+        id: s.id, role: s.role, provider: s.provider, status: s.status, featureId: s.featureId,
       })),
     });
     break;

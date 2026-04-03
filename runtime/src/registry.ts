@@ -2,8 +2,9 @@
  * Session registry — in-memory map of active sessions with persistence
  * to .ai/state/sessions.json.
  *
- * The registry is the runtime view; sessions.json is the durable record
- * that survives process restarts.
+ * sessions.json is runtime bookkeeping that survives process restarts.
+ * It is NOT the durable source of truth — delivery artefacts in
+ * delivery/ and docs/ hold that role.
  */
 
 import { existsSync } from "node:fs";
@@ -58,13 +59,40 @@ export class SessionRegistry {
     if (!existsSync(this.registryPath)) return;
     try {
       const raw = readFileSync(this.registryPath, "utf-8");
-      const data = JSON.parse(raw) as { sessions?: WorkerSession[] };
+      const data = JSON.parse(raw) as { sessions?: Record<string, unknown>[] };
       for (const s of data.sessions ?? []) {
-        this.sessions.set(s.id, s);
+        const session = SessionRegistry.normalise(s) as unknown as WorkerSession;
+        this.sessions.set(session.id, session);
       }
     } catch {
       // Corrupt file — start empty
     }
+  }
+
+  /** Normalise legacy snake_case fields to camelCase. */
+  private static normalise(s: Record<string, unknown>): Record<string, unknown> {
+    const remap: [string, string][] = [
+      ["feature_id", "featureId"],
+      ["epic_id", "epicId"],
+      ["release_id", "releaseId"],
+      ["role_content_path", "roleContentPath"],
+      ["created_at", "createdAt"],
+      ["updated_at", "updatedAt"],
+      ["stopped_at", "stoppedAt"],
+      ["last_message_at", "lastMessageAt"],
+    ];
+    for (const [oldKey, newKey] of remap) {
+      if (s[oldKey] !== undefined && s[newKey] === undefined) {
+        s[newKey] = s[oldKey];
+        delete s[oldKey];
+      }
+    }
+    // Fold legacy provider_session_id into metadata
+    if (s.provider_session_id !== undefined) {
+      s.metadata = { ...(s.metadata as Record<string, unknown> ?? {}), providerSessionId: s.provider_session_id };
+      delete s.provider_session_id;
+    }
+    return s;
   }
 
   private persist(): void {

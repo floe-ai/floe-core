@@ -2,6 +2,7 @@
  * Claude provider adapter — uses @anthropic-ai/claude-agent-sdk.
  *
  * SDK reference: https://platform.claude.com/docs/en/agent-sdk/typescript
+ * SDK package:   @anthropic-ai/claude-agent-sdk (v0.2.x)
  *
  * Auth: ANTHROPIC_API_KEY environment variable required.
  * Anthropic explicitly does not allow third-party SDK products to reuse
@@ -12,6 +13,10 @@
  *   - The Agent SDK has native session persistence (JSONL files on disk).
  *   - Sessions can be resumed by session ID using the `resume` option in query().
  *   - This adapter stores the Claude session ID and uses it for all resumptions.
+ *
+ * API surface used:
+ *   - query({ prompt, options }) — main entry point, returns an async iterable of events
+ *   - Events have a `type` field; assistant messages contain content blocks
  */
 
 import type { ProviderAdapter } from "./interface.ts";
@@ -27,6 +32,7 @@ import type {
 interface ClaudeSessionMeta {
   claudeSessionId: string;
   session: WorkerSession;
+  systemPrompt?: string;
 }
 
 export class ClaudeAdapter implements ProviderAdapter {
@@ -44,10 +50,11 @@ export class ClaudeAdapter implements ProviderAdapter {
     }
   }
 
-  private async getQueryFn(): Promise<(prompt: string, options: Record<string, unknown>) => AsyncIterable<unknown>> {
+  private async getQueryFn(): Promise<(options: Record<string, unknown>) => AsyncIterable<unknown>> {
     try {
+      // @ts-ignore — optional peer dependency, dynamically imported
       const sdk = await import("@anthropic-ai/claude-agent-sdk");
-      return sdk.query as unknown as (prompt: string, options: Record<string, unknown>) => AsyncIterable<unknown>;
+      return sdk.query as unknown as (options: Record<string, unknown>) => AsyncIterable<unknown>;
     } catch {
       throw new Error(
         "Claude Agent SDK not available. Install @anthropic-ai/claude-agent-sdk."
@@ -60,7 +67,6 @@ export class ClaudeAdapter implements ProviderAdapter {
   }
 
   private generateSessionId(): string {
-    // Claude session IDs are UUIDs
     return crypto.randomUUID();
   }
 
@@ -96,7 +102,11 @@ export class ClaudeAdapter implements ProviderAdapter {
       metadata: { claudeSessionId },
     };
 
-    this.sessions.set(id, { claudeSessionId, session });
+    this.sessions.set(id, {
+      claudeSessionId,
+      session,
+      systemPrompt: this.buildSystemPrompt(config),
+    });
     return session;
   }
 
@@ -105,7 +115,6 @@ export class ClaudeAdapter implements ProviderAdapter {
     storedSession: WorkerSession,
     _config?: Partial<WorkerConfig>
   ): Promise<WorkerSession> {
-    // Check in-memory first (same process, no restart needed)
     const existing = this.sessions.get(sessionId);
     if (existing) {
       existing.session.status = "active";
@@ -136,6 +145,28 @@ export class ClaudeAdapter implements ProviderAdapter {
     this.sessions.set(session.id, { claudeSessionId, session });
   }
 
+  /** Build query options for the Claude Agent SDK query() call. */
+  private buildQueryOptions(meta: ClaudeSessionMeta): Record<string, unknown> {
+    return {
+      resume: meta.claudeSessionId,
+      sessionId: meta.claudeSessionId,
+      persistSession: true,
+      ...(meta.systemPrompt ? { systemPrompt: meta.systemPrompt } : {}),
+    };
+  }
+
+  /** Extract text content from a Claude SDK event. */
+  private extractText(event: any): string {
+    if (event?.type === "assistant" && event?.message?.content) {
+      const blocks = Array.isArray(event.message.content) ? event.message.content : [];
+      return blocks
+        .filter((b: any) => b?.type === "text" && typeof b.text === "string")
+        .map((b: any) => b.text)
+        .join("");
+    }
+    return "";
+  }
+
   async sendMessage(
     sessionId: string,
     message: string,
@@ -147,23 +178,18 @@ export class ClaudeAdapter implements ProviderAdapter {
     if (!meta) throw new Error(`Claude session not found: ${sessionId}`);
 
     const queryFn = await this.getQueryFn();
-    const queryOptions: Record<string, unknown> = {
-      resume: meta.claudeSessionId,
-      sessionId: meta.claudeSessionId,
-      persistSession: true,
+    const queryOptions = {
+      prompt: message,
+      options: this.buildQueryOptions(meta),
     };
 
     let fullContent = "";
-    for await (const event of queryFn(message, queryOptions) as AsyncIterable<any>) {
-      if (event?.type === "assistant" && event?.message?.content) {
-        for (const block of Array.isArray(event.message.content) ? event.message.content : []) {
-          if (block?.type === "text" && typeof block.text === "string") {
-            fullContent += block.text;
-          }
-        }
-      }
+    for await (const event of queryFn(queryOptions) as AsyncIterable<any>) {
+      fullContent += this.extractText(event);
     }
 
+    // Clear system prompt after first message (it's been injected)
+    meta.systemPrompt = undefined;
     meta.session.lastMessageAt = this.now();
     meta.session.updatedAt = this.now();
 
@@ -185,28 +211,25 @@ export class ClaudeAdapter implements ProviderAdapter {
     if (!meta) throw new Error(`Claude session not found: ${sessionId}`);
 
     const queryFn = await this.getQueryFn();
-    const queryOptions: Record<string, unknown> = {
-      resume: meta.claudeSessionId,
-      sessionId: meta.claudeSessionId,
-      persistSession: true,
+    const queryOptions = {
+      prompt: message,
+      options: this.buildQueryOptions(meta),
     };
 
     let fullContent = "";
-    for await (const event of queryFn(message, queryOptions) as AsyncIterable<any>) {
-      if (event?.type === "assistant" && event?.message?.content) {
-        for (const block of Array.isArray(event.message.content) ? event.message.content : []) {
-          if (block?.type === "text" && typeof block.text === "string") {
-            fullContent += block.text;
-            handlers.onDelta?.(block.text, {
-              type: "message_delta",
-              sessionId,
-              data: block.text,
-            });
-          }
-        }
+    for await (const event of queryFn(queryOptions) as AsyncIterable<any>) {
+      const text = this.extractText(event);
+      if (text) {
+        fullContent += text;
+        handlers.onDelta?.(text, {
+          type: "message_delta",
+          sessionId,
+          data: text,
+        });
       }
     }
 
+    meta.systemPrompt = undefined;
     meta.session.lastMessageAt = this.now();
     meta.session.updatedAt = this.now();
 

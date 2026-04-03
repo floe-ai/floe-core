@@ -4,6 +4,7 @@
  * SDK reference:  https://docs.github.com/en/copilot/how-tos/copilot-sdk
  * SDK source:     https://github.com/github/copilot-sdk
  * Getting started: https://github.com/github/copilot-sdk/blob/main/docs/getting-started.md
+ * SDK version:    v0.1.x (technical preview)
  *
  * Auth: Uses existing GitHub/Copilot CLI credentials automatically.
  * The CopilotClient picks up the local auth session. No API key required.
@@ -19,6 +20,10 @@
  *   - Delta events: assistant.message_delta with event.data.deltaContent
  *   - Completion: session.idle fires when the response is ready.
  *   - session.on() returns an unsubscribe function — there is no .off() method.
+ *
+ * Non-streaming convenience:
+ *   - sendAndWait({ prompt }) returns a promise that resolves with the full response.
+ *   - Used in sendMessage() for cleaner non-streaming path.
  */
 
 import type { ProviderAdapter } from "./interface.ts";
@@ -31,9 +36,13 @@ import type {
   EventHandlers,
 } from "../types.ts";
 
-// ── SDK type shapes (sourced from @github/copilot-sdk v0.2.0+) ──────────────
+// ── SDK type shapes (sourced from @github/copilot-sdk v0.1.x) ───────────────
 
 type SessionEventHandler = (event: unknown) => void;
+
+interface CopilotSendAndWaitResult {
+  data: { content: string };
+}
 
 interface CopilotSession {
   /** SDK-assigned session identifier. Persist and use with client.resumeSession(). */
@@ -42,6 +51,8 @@ interface CopilotSession {
   readonly workspacePath?: string;
   /** Send a prompt. Resolves when dispatch is complete; subscribe to events for the response. */
   send(options: { prompt: string }): Promise<void>;
+  /** Send a prompt and wait for the complete response. */
+  sendAndWait(options: { prompt: string }): Promise<CopilotSendAndWaitResult | null>;
   /** Subscribe to all events or a specific event type. Returns an unsubscribe function. */
   on(handler: SessionEventHandler): () => void;
   on(eventType: string, handler: SessionEventHandler): () => void;
@@ -88,6 +99,7 @@ export class CopilotAdapter implements ProviderAdapter {
 
   private async createClient(): Promise<CopilotClientApi> {
     try {
+      // @ts-ignore — optional peer dependency, dynamically imported
       const { CopilotClient } = await import("@github/copilot-sdk");
       return new CopilotClient() as unknown as CopilotClientApi;
     } catch {
@@ -141,7 +153,6 @@ export class CopilotAdapter implements ProviderAdapter {
       createdAt: now,
       updatedAt: now,
       metadata: {
-        // Store the SDK session ID so we can resume cross-process
         copilotSessionId: copilotSession.sessionId,
         workspacePath: copilotSession.workspacePath,
       },
@@ -156,7 +167,6 @@ export class CopilotAdapter implements ProviderAdapter {
     storedSession: WorkerSession,
     _config?: Partial<WorkerConfig>
   ): Promise<WorkerSession> {
-    // Check in-memory first (same process, no restart needed)
     const existing = this.sessions.get(sessionId);
     if (existing) {
       existing.session.status = "active";
@@ -201,41 +211,19 @@ export class CopilotAdapter implements ProviderAdapter {
   async sendMessage(
     sessionId: string,
     message: string,
-    options?: SendOptions
+    _options?: SendOptions
   ): Promise<MessageResult> {
     const meta = this.sessions.get(sessionId);
     if (!meta) throw new Error(`Copilot session not found: ${sessionId}`);
 
-    return new Promise((resolve, reject) => {
-      let content = "";
-      const timeoutMs = options?.timeoutMs ?? 120_000;
-      let unsubscribe: (() => void) | null = null;
+    // Use sendAndWait() for non-streaming — cleaner than manual event subscription
+    const response = await meta.copilotSession.sendAndWait({ prompt: message });
+    const content = response?.data?.content ?? "";
 
-      const timer = setTimeout(() => {
-        if (unsubscribe) unsubscribe();
-        reject(new Error(`Copilot session ${sessionId} timed out after ${timeoutMs}ms`));
-      }, timeoutMs);
+    meta.session.lastMessageAt = this.now();
+    meta.session.updatedAt = this.now();
 
-      // session.on() returns an unsubscribe fn; there is no .off() method
-      unsubscribe = meta.copilotSession.on((event: unknown) => {
-        const e = event as { type?: string; data?: { content?: string } };
-        if (e?.type === "assistant.message" && e?.data?.content) {
-          content = e.data.content;
-        } else if (e?.type === "session.idle") {
-          clearTimeout(timer);
-          if (unsubscribe) unsubscribe();
-          meta.session.lastMessageAt = this.now();
-          meta.session.updatedAt = this.now();
-          resolve({ sessionId, content, finishReason: "stop" });
-        }
-      });
-
-      meta.copilotSession.send({ prompt: message }).catch((err: unknown) => {
-        clearTimeout(timer);
-        if (unsubscribe) unsubscribe();
-        reject(err);
-      });
-    });
+    return { sessionId, content, finishReason: "stop" };
   }
 
   async streamEvents(
