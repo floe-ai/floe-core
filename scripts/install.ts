@@ -207,7 +207,7 @@ function scaffoldProject(projectRoot: string): string[] {
     "delivery/releases", "delivery/epics", "delivery/features",
     "delivery/reviews", "delivery/summaries", "delivery/notes",
     "docs/prd", "docs/architecture", "docs/decisions",
-    ".ai/state", ".ai/memory",
+    ".ai/state",
   ];
 
   for (const dir of dirs) {
@@ -223,8 +223,6 @@ function scaffoldProject(projectRoot: string): string[] {
   const aiGitignore = join(projectRoot, ".ai", ".gitignore");
   const gitignoreContent = [
     "state/",
-    "memory/*.db",
-    "memory/*.db-*",
     "runtime/node_modules/",
     "",
   ].join("\n");

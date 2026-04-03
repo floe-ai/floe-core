@@ -4,7 +4,7 @@
  *
  * Usage: bun run scripts/init.ts [--project-root <path>]
  *
- * Creates delivery/, docs/prd|architecture|decisions, .ai/state/, .ai/memory/
+ * Creates delivery/, docs/prd|architecture|decisions, .ai/state/
  * and initialises runtime state if not present.
  */
 
@@ -28,7 +28,7 @@ const p = paths(values["project-root"] as string | undefined);
 const dirs = [
   p.releases, p.epics, p.features, p.reviews, p.summaries, p.notes,
   p.prd, p.architecture, p.decisions,
-  p.state, p.memory,
+  p.state,
 ];
 
 const created: string[] = [];
@@ -57,10 +57,6 @@ if (!existsSync(aiGitignore)) {
     [
       "# Runtime state — not committed",
       "state/",
-      "",
-      "# Memory DB — managed by floe-mem",
-      "memory/*.db",
-      "memory/*.db-*",
       "",
     ].join("\n"),
     "utf-8"
