@@ -13,6 +13,7 @@
  *   stop-worker          Stop a worker session
  *   list-active-workers  List all active sessions
  *   manage-feature-pair  Launch implementer + reviewer pair
+ *   check-alignment      Check approach alignment status for a feature
  *
  * Provider env vars:
  *   ANTHROPIC_API_KEY   — required for Claude adapter
@@ -24,7 +25,7 @@ import { parseArgs } from "node:util";
 import { SessionRegistry } from "../runtime/registry.ts";
 import type { ProviderAdapter } from "../runtime/adapters/interface.ts";
 import { MockAdapter } from "../runtime/adapters/mock.ts";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 
 // ─── Adapter registry ────────────────────────────────────────────────
@@ -85,6 +86,41 @@ function readRoleContent(role: string, projectRoot: string): { content: string |
   return { content: undefined, path: undefined };
 }
 
+// ─── Validation helpers ──────────────────────────────────────────────
+
+function featureArtefactExists(featureId: string, projectRoot: string): boolean {
+  const featuresDir = join(projectRoot, "delivery", "features");
+  if (!existsSync(featuresDir)) return false;
+  return existsSync(join(featuresDir, `${featureId}.json`));
+}
+
+function artefactExists(type: string, id: string, projectRoot: string): boolean {
+  const dir = join(projectRoot, "delivery", `${type}s`);
+  if (!existsSync(dir)) return false;
+  return existsSync(join(dir, `${id}.json`));
+}
+
+function getAlignmentStatus(featureId: string, projectRoot: string): {
+  hasReview: boolean;
+  approachStatus: string | null;
+  reviewId: string | null;
+} {
+  const reviewsDir = join(projectRoot, "delivery", "reviews");
+  if (!existsSync(reviewsDir)) return { hasReview: false, approachStatus: null, reviewId: null };
+
+  const files = readdirSync(reviewsDir).filter(f => f.endsWith(".json"));
+  for (const f of files) {
+    try {
+      const review = JSON.parse(readFileSync(join(reviewsDir, f), "utf-8"));
+      if (review.target_id === featureId && review.status === "open") {
+        const status = review.approach_proposal?.verdict ?? null;
+        return { hasReview: true, approachStatus: status, reviewId: review.id };
+      }
+    } catch {}
+  }
+  return { hasReview: false, approachStatus: null, reviewId: null };
+}
+
 // ─── Commands ────────────────────────────────────────────────────────
 
 const projectRoot = findProjectRoot();
@@ -92,9 +128,36 @@ const registry = new SessionRegistry(projectRoot);
 
 async function launchWorker(args: Record<string, any>) {
   const role = args.role;
+  if (!role) return { ok: false, error: "Missing required flag: --role" };
+
   const provider = args.provider ?? process.env.FLOE_PROVIDER ?? "mock";
   const adapter = adapters.get(provider);
   if (!adapter) return { ok: false, error: `No adapter for provider: ${provider}` };
+
+  // Planner scope validation
+  if (role === "planner") {
+    const scope = args.scope;
+    const target = args.target;
+    if (!scope || !target) {
+      return { ok: false, error: "launch-worker --role planner requires --scope <release|epic> and --target <id>" };
+    }
+    if (scope !== "release" && scope !== "epic") {
+      return { ok: false, error: `Invalid --scope: ${scope}. Must be 'release' or 'epic'.` };
+    }
+    if (!artefactExists(scope, target, projectRoot)) {
+      return { ok: false, error: `${scope} artefact not found: ${target}` };
+    }
+  }
+
+  // Implementer/reviewer require feature
+  if ((role === "implementer" || role === "reviewer") && !args.feature) {
+    return { ok: false, error: `launch-worker --role ${role} requires --feature <id>` };
+  }
+
+  // Validate feature exists if provided
+  if (args.feature && !featureArtefactExists(args.feature, projectRoot)) {
+    return { ok: false, error: `Feature artefact not found: ${args.feature}. Create the feature via the Planner first.` };
+  }
 
   const { content: roleContent, path: roleContentPath } = readRoleContent(role, projectRoot);
 
@@ -141,6 +204,21 @@ async function messageWorker(args: Record<string, any>) {
 
   const adapter = adapters.get(stored.provider);
   if (!adapter) return { ok: false, error: `No adapter for provider: ${stored.provider}` };
+
+  // Hard alignment gate: block implementer messages when approach not approved
+  if (stored.role === "implementer" && stored.featureId && !args["force-no-alignment"]) {
+    const alignment = getAlignmentStatus(stored.featureId, projectRoot);
+    if (!alignment.hasReview || alignment.approachStatus !== "approved") {
+      return {
+        ok: false,
+        error: "Approach not approved — implementer messages are blocked until the reviewer approves the execution approach.",
+        featureId: stored.featureId,
+        hasReview: alignment.hasReview,
+        approachStatus: alignment.approachStatus,
+        hint: "Use --force-no-alignment to override (visible, intentional override only).",
+      };
+    }
+  }
 
   const result = await adapter.sendMessage(args.session, args.message);
   const now = new Date().toISOString();
@@ -213,6 +291,13 @@ async function listActiveWorkers(args: Record<string, any>) {
 }
 
 async function manageFeaturePair(args: Record<string, any>) {
+  if (!args.feature) return { ok: false, error: "manage-feature-pair requires --feature <id>" };
+
+  // Validate feature artefact exists
+  if (!featureArtefactExists(args.feature, projectRoot)) {
+    return { ok: false, error: `Feature artefact not found: ${args.feature}. The Planner must create the feature before execution can begin.` };
+  }
+
   const implProvider = args["implementer-provider"] ?? process.env.FLOE_PROVIDER ?? "mock";
   const revProvider = args["reviewer-provider"] ?? process.env.FLOE_PROVIDER ?? "mock";
 
@@ -226,6 +311,20 @@ async function manageFeaturePair(args: Record<string, any>) {
     featureId: args.feature,
     implementer: { sessionId: (implementer as any).sessionId, provider: implProvider },
     reviewer: { sessionId: (reviewer as any).sessionId, provider: revProvider },
+  };
+}
+
+async function checkAlignment(args: Record<string, any>) {
+  if (!args.feature) return { ok: false, error: "check-alignment requires --feature <id>" };
+
+  const alignment = getAlignmentStatus(args.feature, projectRoot);
+  return {
+    ok: true,
+    featureId: args.feature,
+    hasReview: alignment.hasReview,
+    approachStatus: alignment.approachStatus,
+    reviewId: alignment.reviewId,
+    approved: alignment.approachStatus === "approved",
   };
 }
 
@@ -245,8 +344,11 @@ const { values: opts } = parseArgs({
     session: { type: "string" },
     message: { type: "string" },
     reason: { type: "string" },
+    scope: { type: "string" },
+    target: { type: "string" },
     "implementer-provider": { type: "string" },
     "reviewer-provider": { type: "string" },
+    "force-no-alignment": { type: "boolean" },
   },
   strict: false,
 });
@@ -263,6 +365,7 @@ async function main() {
     "stop-worker": stopWorker,
     "list-active-workers": listActiveWorkers,
     "manage-feature-pair": manageFeaturePair,
+    "check-alignment": checkAlignment,
   };
 
   const handler = commands[command];

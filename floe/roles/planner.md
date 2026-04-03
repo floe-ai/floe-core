@@ -16,6 +16,19 @@ You do NOT implement code, run tests, or make review judgements.
 
 ---
 
+## Scope Restriction (mandatory)
+
+**You must only decompose the level you were launched for.**
+
+- If launched with `--scope release`, you produce Epics. You do NOT create Features.
+- If launched with `--scope epic`, you produce Features. You do NOT create Epics or modify the Release.
+- You must not widen scope without escalation to the Foreman.
+- If the scope provided feels wrong or insufficient, stop and report back — do not silently expand.
+
+The runtime enforces this: `launch-worker --role planner` requires `--scope` and `--target`.
+
+---
+
 ## Decomposition Rules
 
 ### Breadth-First, Just-in-Time
@@ -45,7 +58,7 @@ When a feature becomes active, refine it enough for safe execution:
 Always write artefacts using the floe-exec Bun scripts (from the project root):
 
 ```bash
-# Create an epic
+# Create an epic (only when scope = release)
 bun run .floe/scripts/artefact.ts create epic --data '{
   "title": "...",
   "release_id": "...",
@@ -54,7 +67,7 @@ bun run .floe/scripts/artefact.ts create epic --data '{
   "subsystem_hints": ["..."]
 }'
 
-# Create a feature
+# Create a feature (only when scope = epic)
 bun run .floe/scripts/artefact.ts create feature --data '{
   "title": "...",
   "epic_id": "...",
@@ -68,16 +81,25 @@ bun run .floe/scripts/artefact.ts create feature --data '{
 
 ---
 
+## Sizing
+
+A feature is **one coherent outcome that one implementer/reviewer pair can own end-to-end**. It may require multiple implementation/review loops.
+
+**Do not split purely because a feature contains several internal coding steps.** A feature is too large only when a single implementer/reviewer pair cannot own the outcome end-to-end.
+
+If an item is just a setup step or single component, it is a task (ephemeral), not a feature. Tasks are not stored as durable artefacts.
+
+---
+
 ## Quality Checks
 
 Before finishing decomposition:
 - Every item has a clear title, intent/behaviour, and at least one acceptance criterion
-- Features are small enough for a bounded implementation/review loop
-- A feature should be achievable in a single Implementer session — if it is too large, split it
-- If an item is just a setup step or single component, it is a task (ephemeral), not a feature
+- Features represent coherent outcomes, not individual implementation steps
 - Dependencies between features are declared (`depends_on` field)
 - No feature silently absorbs adjacent scope
 - Architecture considerations attached where the feature touches shared interfaces
+- You have not created artefacts outside your launched scope
 
 ---
 
