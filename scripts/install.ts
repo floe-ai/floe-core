@@ -221,9 +221,22 @@ function scaffoldProject(projectRoot: string): string[] {
 
   // .ai/.gitignore
   const aiGitignore = join(projectRoot, ".ai", ".gitignore");
+  const gitignoreContent = [
+    "state/",
+    "memory/*.db",
+    "memory/*.db-*",
+    "runtime/node_modules/",
+    "",
+  ].join("\n");
   if (!existsSync(aiGitignore)) {
-    writeFileSync(aiGitignore, "state/\nmemory/*.db\nmemory/*.db-*\n", "utf-8");
+    writeFileSync(aiGitignore, gitignoreContent, "utf-8");
     created.push(".ai/.gitignore");
+  } else {
+    // Ensure runtime/node_modules/ is in existing gitignore
+    const existing = readFileSync(aiGitignore, "utf-8");
+    if (!existing.includes("runtime/node_modules")) {
+      writeFileSync(aiGitignore, existing.trimEnd() + "\nruntime/node_modules/\n", "utf-8");
+    }
   }
 
   // Initialise runtime state if not present
@@ -247,10 +260,39 @@ function scaffoldProject(projectRoot: string): string[] {
   return created;
 }
 
-// ── Runtime dependency install ────────────────────────────────────────
+// ── Runtime install (copy into project) ───────────────────────────────
 
-function installRuntimeDeps(): boolean {
-  const runtimeDir = join(PACKAGE_ROOT, "runtime");
+function installRuntime(projectRoot: string, force: boolean): string {
+  const sourceDir = join(PACKAGE_ROOT, "runtime");
+  const destDir = join(projectRoot, ".ai", "runtime");
+
+  if (!existsSync(join(sourceDir, "package.json"))) {
+    throw new Error(`Runtime source not found at: ${sourceDir}`);
+  }
+
+  // Copy runtime source (skip node_modules — we'll install fresh)
+  if (existsSync(destDir)) {
+    if (!force) {
+      // Already installed — skip copy but still return path
+      return join(destDir, "src", "server.ts");
+    }
+    rmSync(destDir, { recursive: true, force: true });
+  }
+
+  mkdirSync(destDir, { recursive: true });
+
+  // Copy src/, package.json, tsconfig.json (not node_modules)
+  cpSync(join(sourceDir, "src"), join(destDir, "src"), { recursive: true });
+  cpSync(join(sourceDir, "package.json"), join(destDir, "package.json"));
+  if (existsSync(join(sourceDir, "tsconfig.json"))) {
+    cpSync(join(sourceDir, "tsconfig.json"), join(destDir, "tsconfig.json"));
+  }
+
+  return join(destDir, "src", "server.ts");
+}
+
+function installRuntimeDeps(projectRoot: string): boolean {
+  const runtimeDir = join(projectRoot, ".ai", "runtime");
   if (!existsSync(join(runtimeDir, "package.json"))) return false;
 
   try {
@@ -346,10 +388,21 @@ async function main() {
 
     console.log("");
 
-    // ── Step 1: Install skill + agents per client ─────────────────────
+    // ── Step 1: Copy runtime into project ────────────────────────────
+
+    let runtimeServerPath: string;
+    try {
+      runtimeServerPath = installRuntime(projectRoot, force);
+      console.log(`  ✓ runtime copied to .ai/runtime/`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`  ✗ runtime — ${msg}`);
+      process.exit(1);
+    }
+
+    // ── Step 2: Install skill + agents per client ────────────────────
 
     const results: { client: Client; status: string }[] = [];
-    const runtimeServerPath = join(PACKAGE_ROOT, "runtime", "src", "server.ts");
 
     for (const c of clients) {
       try {
@@ -365,7 +418,7 @@ async function main() {
       }
     }
 
-    // ── Step 2: Scaffold project structure ────────────────────────────
+    // ── Step 3: Scaffold project structure ───────────────────────────
 
     let scaffolded: string[] = [];
     if (shouldScaffold) {
@@ -377,16 +430,16 @@ async function main() {
       }
     }
 
-    // ── Step 3: Install runtime dependencies ─────────────────────────
+    // ── Step 4: Install runtime dependencies ─────────────────────────
 
-    const depsOk = installRuntimeDeps();
+    const depsOk = installRuntimeDeps(projectRoot);
     if (depsOk) {
       console.log(`  ✓ runtime dependencies installed`);
     } else {
-      console.log(`  ⚠ runtime dependencies skipped (run 'bun install' in runtime/ manually)`);
+      console.log(`  ⚠ runtime dependencies skipped (run 'bun install' in .ai/runtime/ manually)`);
     }
 
-    // ── Step 4: Validate (optional) ──────────────────────────────────
+    // ── Step 5: Validate (optional) ──────────────────────────────────
 
     if (shouldValidate) {
       const validation = runValidation(projectRoot);

@@ -139,6 +139,8 @@ your-project/
 │   ├── architecture/      architecture documents
 │   └── decisions/         ADRs
 ├── .ai/
+│   ├── runtime/
+│   │   └── src/server.ts  MCP server (auto-started by providers)
 │   └── state/
 │       ├── current.json   active pointers only (gitignored)
 │       └── sessions.json  worker session registry (gitignored)
