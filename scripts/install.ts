@@ -139,40 +139,46 @@ function installAgents(client: Client, projectRoot: string, force: boolean): str
 }
 
 function registerMcpServer(client: Client, projectRoot: string, runtimePath: string): void {
-  const mcpEntry = {
-    type: "stdio",
-    command: "bun",
-    args: ["run", runtimePath],
-    env: {},
-  };
-
   if (client === "copilot") {
-    // Copilot CLI: project-local .copilot/mcp-config.json
-    const configDir = join(projectRoot, ".copilot");
-    const mcpConfigPath = join(configDir, "mcp-config.json");
-    mkdirSync(configDir, { recursive: true });
+    // Copilot CLI: project-local .github/mcp.json
+    // Ref: https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference#mcp-server-configuration
+    const githubDir = join(projectRoot, ".github");
+    const mcpConfigPath = join(githubDir, "mcp.json");
+    mkdirSync(githubDir, { recursive: true });
     let existing: any = {};
     if (existsSync(mcpConfigPath)) {
       try { existing = JSON.parse(readFileSync(mcpConfigPath, "utf-8")); } catch {}
     }
     existing.mcpServers = existing.mcpServers ?? {};
-    existing.mcpServers["floe-runtime"] = mcpEntry;
+    existing.mcpServers["floe-runtime"] = {
+      type: "stdio",
+      command: "bun",
+      args: ["run", runtimePath],
+      tools: ["*"],
+      env: {},
+    };
     writeFileSync(mcpConfigPath, JSON.stringify(existing, null, 2), "utf-8");
 
   } else if (client === "claude") {
     // Claude Code: project-local .mcp.json at repo root
-    // Using .mcp.json (not .claude/settings.json) to avoid merge issues
+    // Ref: https://code.claude.com/docs/en/settings
     const mcpConfigPath = join(projectRoot, ".mcp.json");
     let existing: any = {};
     if (existsSync(mcpConfigPath)) {
       try { existing = JSON.parse(readFileSync(mcpConfigPath, "utf-8")); } catch {}
     }
     existing.mcpServers = existing.mcpServers ?? {};
-    existing.mcpServers["floe-runtime"] = mcpEntry;
+    existing.mcpServers["floe-runtime"] = {
+      type: "stdio",
+      command: "bun",
+      args: ["run", runtimePath],
+      env: {},
+    };
     writeFileSync(mcpConfigPath, JSON.stringify(existing, null, 2), "utf-8");
 
   } else if (client === "codex") {
     // Codex CLI: project-local .codex/config.toml
+    // Ref: https://github.com/openai/codex/blob/main/docs/config.md
     const codexDir = join(projectRoot, ".codex");
     const configPath = join(codexDir, "config.toml");
     mkdirSync(codexDir, { recursive: true });

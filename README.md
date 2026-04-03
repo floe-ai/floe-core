@@ -146,9 +146,8 @@ your-project/
 │       └── sessions.json  worker session registry (gitignored)
 ├── .github/
 │   ├── skills/floe-exec/  skill installation (Copilot)
-│   └── agents/foreman.agent.md
-├── .copilot/
-│   └── mcp-config.json   MCP server registration (Copilot)
+│   ├── agents/foreman.agent.md
+│   └── mcp.json           MCP server registration (Copilot)
 ├── .claude/
 │   ├── skills/floe-exec/  skill installation (Claude)
 │   └── agents/foreman.md
