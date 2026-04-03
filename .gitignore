@@ -1,7 +1,8 @@
 # Runtime state — not committed
-.ai/state/
-.ai/memory/*.db
-.ai/memory/*.db-*
+.floe/state/
+.floe/memory/*.db
+.floe/memory/*.db-*
+.floe/node_modules/
 
 # Node
 node_modules/

@@ -9,18 +9,16 @@ import { resolve, join, dirname, basename } from "node:path";
 
 // ── Project root detection ────────────────────────────────────────────
 
-const MARKERS = [".git", ".github", ".agents", ".claude", "package.json"];
+const MARKERS = [".git", ".floe", ".github", ".agents", ".claude", "package.json"];
 
 export function findProjectRoot(from?: string): string {
-  let dir = from ?? dirname(dirname(import.meta.dir)); // up from scripts/ -> floe-exec/ -> skills/ -> project root
-  // Walk up looking for common markers
+  let dir = from ?? dirname(dirname(import.meta.dir)); // up from scripts/ -> floe/ -> project root
   for (let i = 0; i < 20; i++) {
     if (MARKERS.some((m) => existsSync(join(dir, m)))) return dir;
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
-  // Fallback: use the skill's grandparent
   return dirname(dirname(import.meta.dir));
 }
 
@@ -41,9 +39,9 @@ export function paths(root?: string) {
     prd: join(projectRoot, "docs", "prd"),
     architecture: join(projectRoot, "docs", "architecture"),
     decisions: join(projectRoot, "docs", "decisions"),
-    ai: join(projectRoot, ".ai"),
-    state: join(projectRoot, ".ai", "state"),
-    memory: join(projectRoot, ".ai", "memory"),
+    floe: join(projectRoot, ".floe"),
+    state: join(projectRoot, ".floe", "state"),
+    memory: join(projectRoot, ".floe", "memory"),
     schemas: join(dirname(import.meta.dir), "schemas"),
   };
 }

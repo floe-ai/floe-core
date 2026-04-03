@@ -1,20 +1,16 @@
 {
   "name": "floe-core",
-  "version": "0.1.0",
-  "description": "Repo-local execution framework for AI coding agents. Structured delivery with releases, epics, features, reviews, summaries, and notes. Includes the floe-runtime MCP server for worker session management.",
-  "workspaces": [
-    "runtime"
-  ],
+  "version": "0.2.0",
+  "description": "Repo-local execution framework for AI coding agents. Structured delivery with releases, epics, features, reviews, summaries, and notes. CLI-based worker session management.",
   "bin": {
-    "floe-exec": "scripts/install.ts"
+    "floe-core": "scripts/install.ts"
   },
   "files": [
     "scripts/",
-    "skills/",
-    "agents/",
-    "runtime/"
+    "floe/",
+    "agents/"
   ],
-  "keywords": ["ai", "agent", "execution", "delivery", "framework", "codex", "copilot", "claude", "mcp"],
+  "keywords": ["ai", "agent", "execution", "delivery", "framework", "codex", "copilot", "claude"],
   "license": "MIT",
   "repository": {
     "type": "git",

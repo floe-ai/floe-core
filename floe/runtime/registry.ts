@@ -1,6 +1,6 @@
 /**
  * Session registry — in-memory map of active sessions with persistence
- * to .ai/state/sessions.json.
+ * to .floe/state/sessions.json.
  *
  * sessions.json is runtime bookkeeping that survives process restarts.
  * It is NOT the durable source of truth — delivery artefacts in
@@ -15,8 +15,7 @@ import type { WorkerSession, WorkerStatus } from "./types.ts";
 function findProjectRoot(start: string): string {
   let dir = start;
   for (let i = 0; i < 20; i++) {
-    // Prefer git/github markers over package.json to avoid finding runtime/ as root
-    if (existsSync(join(dir, ".git")) || existsSync(join(dir, ".github"))) {
+    if (existsSync(join(dir, ".git")) || existsSync(join(dir, ".floe")) || existsSync(join(dir, ".github"))) {
       return dir;
     }
     const parent = join(dir, "..");
@@ -51,7 +50,7 @@ export class SessionRegistry {
       projectRoot ??
       process.env.FLOE_PROJECT_ROOT ??
       findProjectRoot(process.cwd());
-    this.registryPath = join(root, ".ai", "state", "sessions.json");
+    this.registryPath = join(root, ".floe", "state", "sessions.json");
     this.load();
   }
 

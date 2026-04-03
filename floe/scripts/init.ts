@@ -4,7 +4,7 @@
  *
  * Usage: bun run scripts/init.ts [--project-root <path>]
  *
- * Creates delivery/, docs/prd|architecture|decisions, .ai/state/
+ * Creates delivery/, docs/prd|architecture|decisions, .floe/state/
  * and initialises runtime state if not present.
  */
 
@@ -48,20 +48,21 @@ for (const dir of dirs) {
   }
 }
 
-// ── Ensure .gitignore for .ai/ runtime state ──────────────────────────
+// ── Ensure .gitignore for .floe/ runtime state ─────────────────────────
 
-const aiGitignore = join(p.ai, ".gitignore");
-if (!existsSync(aiGitignore)) {
+const floeGitignore = join(p.floe, ".gitignore");
+if (!existsSync(floeGitignore)) {
   writeFileSync(
-    aiGitignore,
+    floeGitignore,
     [
       "# Runtime state — not committed",
       "state/",
+      "memory/*.db*",
       "",
     ].join("\n"),
     "utf-8"
   );
-  created.push(".ai/.gitignore");
+  created.push(".floe/.gitignore");
 }
 
 // ── Initialise runtime state ──────────────────────────────────────────
@@ -76,7 +77,7 @@ if (!existsSync(stateFile)) {
     continuation_preference: "stop_after_feature",
     updated_at: timestamp(),
   });
-  created.push(".ai/state/current.json");
+  created.push(".floe/state/current.json");
 }
 
 // ── Detect floe-mem ───────────────────────────────────────────────────

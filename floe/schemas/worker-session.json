@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://floe.ai/schemas/worker-session.json",
   "title": "Worker Session",
-  "description": "A single worker session entry in the runtime session registry. Lives under .ai/state/sessions.json. This is runtime bookkeeping only — not the durable source of truth.",
+  "description": "A single worker session entry in the runtime session registry. Lives under .floe/state/sessions.json. This is runtime bookkeeping only — not the durable source of truth.",
   "type": "object",
   "required": ["id", "role", "provider", "status", "featureId", "createdAt"],
   "properties": {

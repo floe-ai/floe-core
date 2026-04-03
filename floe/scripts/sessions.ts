@@ -2,9 +2,9 @@
 /**
  * floe-exec sessions — worker session registry CRUD.
  *
- * Manages .ai/state/sessions.json — runtime bookkeeping for active and
+ * Manages .floe/state/sessions.json — runtime bookkeeping for active and
  * historical worker sessions. This is NOT the durable source of truth.
- * floe-runtime registry.ts also reads/writes this file.
+ * The runtime registry.ts also reads/writes this file.
  *
  * Field naming: camelCase throughout, matching the runtime TypeScript types.
  *
