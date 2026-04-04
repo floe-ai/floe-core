@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://floe.ai/schemas/config.json",
+  "title": "Floe Configuration",
+  "description": "Provider configuration for floe worker sessions. Lives at .floe/config.json. Committed to git (no secrets — API keys stay in environment variables).",
+  "type": "object",
+  "required": ["defaultProvider"],
+  "properties": {
+    "defaultProvider": {
+      "type": "string",
+      "enum": ["codex", "claude", "copilot"],
+      "description": "Default provider for all worker sessions unless overridden per role"
+    },
+    "roles": {
+      "type": "object",
+      "description": "Per-role provider overrides. Omit a role to use defaultProvider.",
+      "properties": {
+        "planner": { "$ref": "#/$defs/roleConfig" },
+        "implementer": { "$ref": "#/$defs/roleConfig" },
+        "reviewer": { "$ref": "#/$defs/roleConfig" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "roleConfig": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": ["codex", "claude", "copilot"],
+          "description": "Provider for this role. Omit to use defaultProvider."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model identifier passed to the provider adapter. Provider-specific (e.g. 'claude-sonnet-4-20250514', 'o3-mini'). Omit to use provider default."
+        },
+        "thinking": {
+          "type": "string",
+          "enum": ["low", "normal", "high"],
+          "description": "Thinking/reasoning level. Adapter maps to provider-specific settings. Omit for provider default."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

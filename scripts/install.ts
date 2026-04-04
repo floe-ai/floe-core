@@ -391,7 +391,33 @@ async function main() {
       console.log(`  ⚠ dependencies skipped (run 'bun install' in .floe/ manually)`);
     }
 
-    // ── Step 5: Validate (optional) ───────────────────────────────────
+    // ── Step 5: Provider configuration ──────────────────────────────
+
+    const configPath = join(projectRoot, ".floe", "config.json");
+    if (!existsSync(configPath)) {
+      if (!nonInteractive && process.stdout.isTTY) {
+        console.log("");
+        const wantConfigure = await confirm(rl, "Set up provider configuration now?");
+        if (wantConfigure) {
+          try {
+            execSync(
+              `bun run "${join(projectRoot, ".floe", "bin", "floe.ts")}" configure`,
+              { cwd: projectRoot, stdio: "inherit", timeout: 120_000 }
+            );
+            console.log(`  ✓ provider configuration saved`);
+          } catch {
+            console.log(`  ⚠ provider configuration skipped`);
+            console.log(`    Run later: bun run .floe/bin/floe.ts configure`);
+          }
+        } else {
+          console.log(`  → Run later: bun run .floe/bin/floe.ts configure`);
+        }
+      } else {
+        console.log(`  → Run: bun run .floe/bin/floe.ts configure  (set up providers)`);
+      }
+    }
+
+    // ── Step 6: Validate (optional) ───────────────────────────────────
 
     if (shouldValidate) {
       const validation = runValidation(projectRoot);
@@ -411,7 +437,11 @@ async function main() {
       process.exit(1);
     }
 
-    console.log(`\n✓ floe-core installed. Open your agent (codex, claude, or copilot) to start.\n`);
+    console.log(`\n✓ floe-core installed. Open your agent (codex, claude, or copilot) to start.`);
+    if (!existsSync(configPath)) {
+      console.log(`  Remember to configure providers: bun run .floe/bin/floe.ts configure`);
+    }
+    console.log("");
   } finally {
     rl.close();
   }

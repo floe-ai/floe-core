@@ -157,10 +157,10 @@ bun run .floe/scripts/review.ts get-for <feature_id>        # get active review 
 
 ## Worker Management (floe CLI)
 
-Use the floe CLI to manage worker sessions:
+Use the floe CLI to manage worker sessions. Provider configuration is in `.floe/config.json` (set up via `bun run .floe/bin/floe.ts configure`).
 
 ```bash
-# Launch workers
+# Launch workers (provider resolved from config, env, or --provider flag)
 bun run .floe/bin/floe.ts launch-worker --role planner --scope <release|epic> --target <id>
 bun run .floe/bin/floe.ts manage-feature-pair --feature <id>
 
@@ -174,6 +174,9 @@ bun run .floe/bin/floe.ts list-active-workers
 
 # Alignment
 bun run .floe/bin/floe.ts check-alignment --feature <id>
+
+# Configuration
+bun run .floe/bin/floe.ts configure                     # interactive provider setup
 ```
 
 When launching a Planner, always provide `--scope` (release or epic) and `--target` (the ID). The Planner will decompose only that level.

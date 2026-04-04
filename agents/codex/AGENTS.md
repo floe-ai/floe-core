@@ -61,4 +61,5 @@ bun run .floe/bin/floe.ts launch-worker --role planner --scope <release|epic> --
 bun run .floe/bin/floe.ts manage-feature-pair --feature <id>
 bun run .floe/bin/floe.ts list-active-workers
 bun run .floe/bin/floe.ts check-alignment --feature <id>
+bun run .floe/bin/floe.ts configure                     # set up providers
 ```

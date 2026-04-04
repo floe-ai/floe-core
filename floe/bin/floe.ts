@@ -14,18 +14,27 @@
  *   list-active-workers  List all active sessions
  *   manage-feature-pair  Launch implementer + reviewer pair
  *   check-alignment      Check approach alignment status for a feature
+ *   configure            Set up provider defaults (interactive or flags)
+ *
+ * Provider resolution order:
+ *   1. --provider flag
+ *   2. FLOE_PROVIDER env var
+ *   3. .floe/config.json role-specific override
+ *   4. .floe/config.json defaultProvider
+ *   5. Error (no silent mock default)
  *
  * Provider env vars:
  *   ANTHROPIC_API_KEY   — required for Claude adapter
  *   OPENAI_API_KEY      — optional for Codex (falls back to local sign-in)
- *   FLOE_PROVIDER       — default provider: codex|claude|copilot|mock (default: mock)
+ *   FLOE_PROVIDER       — override provider for all roles
  */
 
 import { parseArgs } from "node:util";
+import { createInterface } from "node:readline";
 import { SessionRegistry } from "../runtime/registry.ts";
 import type { ProviderAdapter } from "../runtime/adapters/interface.ts";
 import { MockAdapter } from "../runtime/adapters/mock.ts";
-import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 
 // ─── Adapter registry ────────────────────────────────────────────────
@@ -33,24 +42,32 @@ import { join, dirname } from "node:path";
 const adapters = new Map<string, ProviderAdapter>();
 adapters.set("mock", new MockAdapter());
 
+const adapterLoadErrors = new Map<string, string>();
+
 async function loadLiveAdapters(): Promise<void> {
   try {
     // @ts-ignore — optional peer dependency
     const { CodexAdapter } = await import("../runtime/adapters/codex.ts");
     adapters.set("codex", new CodexAdapter());
-  } catch {}
+  } catch (e: any) {
+    adapterLoadErrors.set("codex", e.message ?? String(e));
+  }
 
   try {
     // @ts-ignore — optional peer dependency
     const { ClaudeAdapter } = await import("../runtime/adapters/claude.ts");
     adapters.set("claude", new ClaudeAdapter());
-  } catch {}
+  } catch (e: any) {
+    adapterLoadErrors.set("claude", e.message ?? String(e));
+  }
 
   try {
     // @ts-ignore — optional peer dependency
     const { CopilotAdapter } = await import("../runtime/adapters/copilot.ts");
     adapters.set("copilot", new CopilotAdapter());
-  } catch {}
+  } catch (e: any) {
+    adapterLoadErrors.set("copilot", e.message ?? String(e));
+  }
 }
 
 // ─── Project root detection ──────────────────────────────────────────
@@ -66,6 +83,78 @@ function findProjectRoot(): string {
     dir = parent;
   }
   return process.cwd();
+}
+
+// ─── Configuration ───────────────────────────────────────────────────
+
+interface FloeConfig {
+  defaultProvider: string;
+  roles?: {
+    planner?: { provider?: string; model?: string; thinking?: string };
+    implementer?: { provider?: string; model?: string; thinking?: string };
+    reviewer?: { provider?: string; model?: string; thinking?: string };
+  };
+}
+
+function loadConfig(projectRoot: string): FloeConfig | null {
+  const configPath = join(projectRoot, ".floe", "config.json");
+  if (!existsSync(configPath)) return null;
+  try {
+    return JSON.parse(readFileSync(configPath, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+function resolveProvider(role: string, args: Record<string, any>, config: FloeConfig | null): {
+  provider: string;
+  model?: string;
+  thinking?: string;
+} {
+  // 1. CLI flag
+  if (args.provider) return { provider: args.provider };
+
+  // 2. Environment variable
+  if (process.env.FLOE_PROVIDER) return { provider: process.env.FLOE_PROVIDER };
+
+  // 3. Config role-specific
+  if (config?.roles) {
+    const roleConfig = (config.roles as any)[role];
+    if (roleConfig?.provider) {
+      return { provider: roleConfig.provider, model: roleConfig.model, thinking: roleConfig.thinking };
+    }
+  }
+
+  // 4. Config default
+  if (config?.defaultProvider) {
+    const roleConfig = config.roles ? (config.roles as any)[role] : undefined;
+    return {
+      provider: config.defaultProvider,
+      model: roleConfig?.model,
+      thinking: roleConfig?.thinking,
+    };
+  }
+
+  // 5. No provider configured
+  return { provider: "" };
+}
+
+function getAdapter(provider: string): { adapter: ProviderAdapter | null; error: string | null } {
+  if (!provider) {
+    return {
+      adapter: null,
+      error: "No provider configured. Run: bun run .floe/bin/floe.ts configure",
+    };
+  }
+  const adapter = adapters.get(provider);
+  if (!adapter) {
+    const loadError = adapterLoadErrors.get(provider);
+    const hint = loadError
+      ? `Adapter for '${provider}' failed to load: ${loadError}`
+      : `No adapter for provider: ${provider}`;
+    return { adapter: null, error: hint };
+  }
+  return { adapter, error: null };
 }
 
 // ─── Role content loading ────────────────────────────────────────────
@@ -130,9 +219,10 @@ async function launchWorker(args: Record<string, any>) {
   const role = args.role;
   if (!role) return { ok: false, error: "Missing required flag: --role" };
 
-  const provider = args.provider ?? process.env.FLOE_PROVIDER ?? "mock";
-  const adapter = adapters.get(provider);
-  if (!adapter) return { ok: false, error: `No adapter for provider: ${provider}` };
+  const config = loadConfig(projectRoot);
+  const resolved = resolveProvider(role, args, config);
+  const { adapter, error } = getAdapter(resolved.provider);
+  if (!adapter) return { ok: false, error };
 
   // Planner scope validation
   if (role === "planner") {
@@ -163,13 +253,15 @@ async function launchWorker(args: Record<string, any>) {
 
   const session = await adapter.startSession({
     role,
-    provider,
+    provider: resolved.provider as any,
     featureId: args.feature,
     epicId: args.epic,
     releaseId: args.release,
     roleContent,
     roleContentPath,
     contextAddendum: args.context,
+    model: resolved.model,
+    thinking: resolved.thinking,
   });
 
   registry.register(session);
@@ -180,8 +272,8 @@ async function resumeWorker(args: Record<string, any>) {
   const stored = registry.get(args.session);
   if (!stored) return { ok: false, error: `Session not found: ${args.session}` };
 
-  const adapter = adapters.get(stored.provider);
-  if (!adapter) return { ok: false, error: `No adapter for provider: ${stored.provider}` };
+  const { adapter, error } = getAdapter(stored.provider);
+  if (!adapter) return { ok: false, error };
 
   let roleContent: string | undefined;
   if (stored.roleContentPath && existsSync(stored.roleContentPath)) {
@@ -202,8 +294,8 @@ async function messageWorker(args: Record<string, any>) {
   const stored = registry.get(args.session);
   if (!stored) return { ok: false, error: `Session not found: ${args.session}` };
 
-  const adapter = adapters.get(stored.provider);
-  if (!adapter) return { ok: false, error: `No adapter for provider: ${stored.provider}` };
+  const { adapter, error } = getAdapter(stored.provider);
+  if (!adapter) return { ok: false, error };
 
   // Hard alignment gate: block implementer messages when approach not approved
   if (stored.role === "implementer" && stored.featureId && !args["force-no-alignment"]) {
@@ -233,8 +325,8 @@ async function getWorkerStatus(args: Record<string, any>) {
   const stored = registry.get(args.session);
   if (!stored) return { ok: false, error: `Session not found: ${args.session}` };
 
-  const adapter = adapters.get(stored.provider);
-  if (!adapter) return { ok: false, error: `No adapter for provider: ${stored.provider}` };
+  const { adapter, error } = getAdapter(stored.provider);
+  if (!adapter) return { ok: false, error };
 
   const status = await adapter.getStatus(args.session);
   return { ok: true, sessionId: args.session, role: stored.role, provider: stored.provider, status, featureId: stored.featureId };
@@ -293,24 +385,30 @@ async function listActiveWorkers(args: Record<string, any>) {
 async function manageFeaturePair(args: Record<string, any>) {
   if (!args.feature) return { ok: false, error: "manage-feature-pair requires --feature <id>" };
 
-  // Validate feature artefact exists
   if (!featureArtefactExists(args.feature, projectRoot)) {
     return { ok: false, error: `Feature artefact not found: ${args.feature}. The Planner must create the feature before execution can begin.` };
   }
 
-  const implProvider = args["implementer-provider"] ?? process.env.FLOE_PROVIDER ?? "mock";
-  const revProvider = args["reviewer-provider"] ?? process.env.FLOE_PROVIDER ?? "mock";
+  const config = loadConfig(projectRoot);
+
+  // Resolve providers for implementer and reviewer independently
+  const implResolved = args["implementer-provider"]
+    ? { provider: args["implementer-provider"] }
+    : resolveProvider("implementer", args, config);
+  const revResolved = args["reviewer-provider"]
+    ? { provider: args["reviewer-provider"] }
+    : resolveProvider("reviewer", args, config);
 
   const [implementer, reviewer] = await Promise.all([
-    launchWorker({ role: "implementer", provider: implProvider, feature: args.feature, epic: args.epic, release: args.release }),
-    launchWorker({ role: "reviewer", provider: revProvider, feature: args.feature, epic: args.epic, release: args.release }),
+    launchWorker({ role: "implementer", provider: implResolved.provider, feature: args.feature, epic: args.epic, release: args.release }),
+    launchWorker({ role: "reviewer", provider: revResolved.provider, feature: args.feature, epic: args.epic, release: args.release }),
   ]);
 
   return {
     ok: true,
     featureId: args.feature,
-    implementer: { sessionId: (implementer as any).sessionId, provider: implProvider },
-    reviewer: { sessionId: (reviewer as any).sessionId, provider: revProvider },
+    implementer: { sessionId: (implementer as any).sessionId, provider: implResolved.provider },
+    reviewer: { sessionId: (reviewer as any).sessionId, provider: revResolved.provider },
   };
 }
 
@@ -326,6 +424,91 @@ async function checkAlignment(args: Record<string, any>) {
     reviewId: alignment.reviewId,
     approved: alignment.approachStatus === "approved",
   };
+}
+
+// ─── Configure command ───────────────────────────────────────────────
+
+const PROVIDERS = ["claude", "codex", "copilot"] as const;
+const PROVIDER_HINTS: Record<string, string> = {
+  claude: "requires ANTHROPIC_API_KEY",
+  codex: "OPENAI_API_KEY or local sign-in",
+  copilot: "uses GitHub CLI credentials",
+};
+
+function askLine(rl: ReturnType<typeof createInterface>, question: string): Promise<string> {
+  return new Promise((resolve) => rl.question(question, resolve));
+}
+
+async function configureCommand(args: Record<string, any>) {
+  const configPath = join(projectRoot, ".floe", "config.json");
+  const nonInteractive = !!args["non-interactive"];
+
+  if (nonInteractive) {
+    const defaultProvider = args["default-provider"];
+    if (!defaultProvider) return { ok: false, error: "configure --non-interactive requires --default-provider <claude|codex|copilot>" };
+    if (!PROVIDERS.includes(defaultProvider as any)) return { ok: false, error: `Invalid provider: ${defaultProvider}. Must be: ${PROVIDERS.join(", ")}` };
+
+    const config: FloeConfig = { defaultProvider };
+    mkdirSync(join(projectRoot, ".floe"), { recursive: true });
+    writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
+    return { ok: true, message: `Wrote ${configPath}`, config };
+  }
+
+  // Interactive mode
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+
+  try {
+    console.error("\nfloe provider configuration");
+    console.error("────────────────────────────\n");
+    console.error("Which provider should workers use by default?");
+    PROVIDERS.forEach((p, i) => console.error(`  ${i + 1}) ${p}   (${PROVIDER_HINTS[p]})`));
+
+    let defaultProvider = "";
+    while (!defaultProvider) {
+      const raw = (await askLine(rl, "> ")).trim();
+      const byIndex = PROVIDERS[parseInt(raw, 10) - 1];
+      const byName = PROVIDERS.find(p => p === raw);
+      const resolved = byIndex ?? byName;
+      if (resolved) {
+        defaultProvider = resolved;
+      } else {
+        console.error(`  Invalid choice. Enter 1-${PROVIDERS.length} or a provider name.`);
+      }
+    }
+
+    const config: FloeConfig = { defaultProvider, roles: {} };
+
+    console.error(`\nDefault provider: ${defaultProvider}`);
+    const customizeRaw = (await askLine(rl, "Customize per role? [y/N] ")).trim().toLowerCase();
+    const customize = customizeRaw === "y" || customizeRaw === "yes";
+
+    if (customize) {
+      for (const role of ["planner", "implementer", "reviewer"] as const) {
+        const provRaw = (await askLine(rl, `${role} provider [${defaultProvider}]: `)).trim();
+        const prov = provRaw && PROVIDERS.includes(provRaw as any) ? provRaw : "";
+        const modelRaw = (await askLine(rl, `${role} model (optional, Enter to skip): `)).trim();
+
+        if (prov || modelRaw) {
+          (config.roles as any)[role] = {};
+          if (prov) (config.roles as any)[role].provider = prov;
+          if (modelRaw) (config.roles as any)[role].model = modelRaw;
+        }
+      }
+    }
+
+    // Clean up empty roles object
+    if (config.roles && Object.keys(config.roles).length === 0) {
+      delete config.roles;
+    }
+
+    mkdirSync(join(projectRoot, ".floe"), { recursive: true });
+    writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
+    console.error(`\n✓ Wrote ${configPath}\n`);
+
+    return { ok: true, message: `Wrote ${configPath}`, config };
+  } finally {
+    rl.close();
+  }
 }
 
 // ─── CLI dispatch ────────────────────────────────────────────────────
@@ -349,6 +532,8 @@ const { values: opts } = parseArgs({
     "implementer-provider": { type: "string" },
     "reviewer-provider": { type: "string" },
     "force-no-alignment": { type: "boolean" },
+    "default-provider": { type: "string" },
+    "non-interactive": { type: "boolean" },
   },
   strict: false,
 });
@@ -366,6 +551,7 @@ async function main() {
     "list-active-workers": listActiveWorkers,
     "manage-feature-pair": manageFeaturePair,
     "check-alignment": checkAlignment,
+    "configure": configureCommand,
   };
 
   const handler = commands[command];

@@ -8,7 +8,7 @@
   "properties": {
     "id": {
       "type": "string",
-      "description": "Unique session identifier (e.g. mock-abc123-xyz)"
+      "description": "Unique session identifier (provider-prefixed, e.g. claude-abc123)"
     },
     "role": {
       "type": "string",

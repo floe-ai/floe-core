@@ -18,6 +18,10 @@ export interface WorkerConfig {
   roleContentPath?: string;
   /** Additional context to include in the system prompt */
   contextAddendum?: string;
+  /** Provider-specific model identifier (e.g. 'claude-sonnet-4-20250514', 'o3-mini'). Passed through to adapter. */
+  model?: string;
+  /** Thinking/reasoning level: 'low' | 'normal' | 'high'. Adapter maps to provider-specific settings. */
+  thinking?: string;
 }
 
 export interface WorkerSession {
