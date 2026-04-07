@@ -13,6 +13,8 @@
  *   bun run scripts/review.ts set-approach <review_id> '<proposal text>'
  *   bun run scripts/review.ts approve-approach <review_id>
  *   bun run scripts/review.ts reject-approach <review_id> '<rationale>'
+ *   bun run scripts/review.ts add-resolution <rev_id> --from <role> --kind <kind> '<message>' [--requested-action <action>]
+ *   bun run scripts/review.ts get-resolution <rev_id>
  *   bun run scripts/review.ts resolve <review_id>
  *   bun run scripts/review.ts list [--status <status>]
  */
@@ -34,6 +36,9 @@ const { values, positionals } = parseArgs({
     status: { type: "string" },
     severity: { type: "string" },
     description: { type: "string" },
+    from: { type: "string" },
+    kind: { type: "string" },
+    "requested-action": { type: "string" },
   },
   allowPositionals: true,
   strict: false,
@@ -214,6 +219,65 @@ switch (cmd) {
     break;
   }
 
+  case "add-resolution": {
+    if (!arg1) fail("Usage: review add-resolution <rev_id> --from <role> --kind <kind> '<message>' [--requested-action <action>]");
+    const fromRole = values.from as string;
+    const kindVal = values.kind as string;
+    if (!fromRole || !kindVal) fail("--from and --kind are required");
+    const validFrom = ["implementer", "reviewer"];
+    if (!validFrom.includes(fromRole)) fail(`--from must be: ${validFrom.join(", ")}`);
+    const validKind = ["revised_approach", "counter_proposal", "clarification", "objection", "acceptance"];
+    if (!validKind.includes(kindVal)) fail(`--kind must be: ${validKind.join(", ")}`);
+
+    const resMessage = positionals.slice(2).join(" ");
+    if (!resMessage) fail("Resolution message is required as positional argument");
+
+    const review = findArtefact(p.reviews, arg1);
+    if (!review) fail(`Not found: ${arg1}`);
+
+    const entry: any = {
+      from: fromRole,
+      kind: kindVal,
+      message: resMessage,
+      status: "pending",
+      at: timestamp(),
+    };
+
+    const requestedAction = values["requested-action"] as string | undefined;
+    if (requestedAction) {
+      const validActions = ["re_evaluate", "revise_approach", "provide_detail", "approve"];
+      if (!validActions.includes(requestedAction)) fail(`--requested-action must be: ${validActions.join(", ")}`);
+      entry.requested_action = requestedAction;
+    }
+
+    review.resolution_thread = review.resolution_thread ?? [];
+    review.resolution_thread.push(entry);
+
+    // Auto-escalation: if thread exceeds 6 entries
+    if (review.resolution_thread.length > 6 && review.approach_proposal) {
+      review.approach_proposal.verdict = "escalated";
+      review.approach_proposal.verdict_rationale = "Auto-escalated: resolution thread exceeded maximum rounds";
+      review.approach_proposal.verdict_at = timestamp();
+    }
+
+    review.updated_at = timestamp();
+    writeJson(join(p.reviews, `${review.id}.json`), review);
+    ok(`Resolution entry added to ${review.id}`, {
+      thread_length: review.resolution_thread.length,
+      auto_escalated: review.resolution_thread.length > 6,
+    });
+    break;
+  }
+
+  case "get-resolution": {
+    if (!arg1) fail("Usage: review get-resolution <rev_id>");
+    const review = findArtefact(p.reviews, arg1);
+    if (!review) fail(`Not found: ${arg1}`);
+    const thread = review.resolution_thread ?? [];
+    output({ ok: true, thread, count: thread.length });
+    break;
+  }
+
   case "resolve": {
     const review = findArtefact(p.reviews, arg1);
     if (!review) fail(`Not found: ${arg1}`);
@@ -242,5 +306,5 @@ switch (cmd) {
   }
 
   default:
-    fail("Usage: review <create|get|get-for|update|add-finding|resolve-finding|set-outcome|set-approach|approve-approach|reject-approach|resolve|list>");
+    fail("Usage: review <create|get|get-for|update|add-finding|resolve-finding|set-outcome|set-approach|approve-approach|reject-approach|add-resolution|get-resolution|resolve|list>");
 }

@@ -82,6 +82,22 @@
       "required": ["proposal", "proposed_at", "verdict"],
       "additionalProperties": false
     },
+    "resolution_thread": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "from": { "type": "string", "enum": ["implementer", "reviewer"] },
+          "kind": { "type": "string", "enum": ["revised_approach", "counter_proposal", "clarification", "objection", "acceptance"] },
+          "message": { "type": "string" },
+          "requested_action": { "type": ["string", "null"], "enum": ["re_evaluate", "revise_approach", "provide_detail", "approve", null] },
+          "status": { "type": "string", "enum": ["pending", "addressed", "superseded"], "default": "pending" },
+          "at": { "type": "string", "format": "date-time" }
+        },
+        "required": ["from", "kind", "message", "status", "at"]
+      },
+      "default": []
+    },
     "linked_summary_ids": {
       "type": "array",
       "items": { "type": "string" },
