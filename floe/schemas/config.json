@@ -11,6 +11,11 @@
       "enum": ["codex", "claude", "copilot"],
       "description": "Default provider for all worker sessions unless overridden per role"
     },
+    "configured": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether interactive configuration has been completed. Set to true after the configure command runs. Existing configs without this field are treated as configured."
+    },
     "roles": {
       "type": "object",
       "description": "Per-role provider overrides. Omit a role to use defaultProvider.",

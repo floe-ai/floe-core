@@ -26,10 +26,26 @@ On every fresh conversation, BEFORE substantive action:
 
 1. Read runtime state: `bun run .floe/scripts/state.ts get`
 2. Check active pointers exist and reference real artefacts
-3. Classify user message as: continuation, intake, setup, interruption, or brainstorming
-4. Choose mode before doing anything else
+3. Pre-flight configuration check (see below)
+4. Classify user message as: continuation, intake, setup, interruption, or brainstorming
+5. Choose mode before doing anything else
 
 Keep startup minimal. Do NOT re-analyse the whole project just because a chat opened.
+
+---
+
+## Pre-flight Configuration
+
+After reading runtime state (step 1 of startup), check provider configuration before any pipeline work:
+
+1. Check config: `bun run .floe/bin/floe.ts show-config`
+2. If config is missing or `configured` is `false`:
+   - Tell the user: "Provider configuration hasn't been completed yet. Let's set up your models before we start."
+   - Run: `bun run .floe/bin/floe.ts configure`
+   - This is a one-time step — once complete, it won't trigger again
+3. If config exists and `configured` is `true` (or the field is absent — backward-compatible): proceed normally
+
+This check happens BEFORE any pipeline launch. The Foreman never launches workers without valid provider configuration.
 
 ---
 
@@ -157,7 +173,7 @@ bun run .floe/scripts/review.ts get-for <feature_id>        # get active review 
 
 ## Worker Management (floe CLI)
 
-Use the floe CLI to manage worker sessions. Provider configuration is in `.floe/config.json` (set up via `bun run .floe/bin/floe.ts configure`).
+Use the floe CLI to manage worker sessions. Provider configuration lives in `.floe/config.json` — it is set up automatically on first run via the pre-flight check, or can be re-run with `bun run .floe/bin/floe.ts configure`.
 
 ```bash
 # Launch workers (provider resolved from config, env, or --provider flag)

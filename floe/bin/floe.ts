@@ -34,6 +34,7 @@
 
 import { parseArgs } from "node:util";
 import { createInterface } from "node:readline";
+import * as p from "@clack/prompts";
 import { SessionRegistry } from "../runtime/registry.ts";
 import type { ProviderAdapter } from "../runtime/adapters/interface.ts";
 import { MockAdapter } from "../runtime/adapters/mock.ts";
@@ -92,6 +93,7 @@ function findProjectRoot(): string {
 
 interface FloeConfig {
   defaultProvider: string;
+  configured?: boolean;
   roles?: {
     planner?: { provider?: string; model?: string; thinking?: string };
     implementer?: { provider?: string; model?: string; thinking?: string };
@@ -520,6 +522,14 @@ function askLine(rl: ReturnType<typeof createInterface>, question: string): Prom
   return new Promise((resolve) => rl.question(question, resolve));
 }
 
+/** Helper: bail out of the configure flow on cancel. */
+function handleCancel(value: unknown): asserts value is Exclude<typeof value, symbol> {
+  if (p.isCancel(value)) {
+    p.cancel("Configuration cancelled.");
+    process.exit(0);
+  }
+}
+
 /** Fuzzy-match user text against model list. Returns best match or null. */
 function fuzzyMatchModel(input: string, items: ModelChoice[]): ModelChoice | null {
   const q = input.toLowerCase().replace(/[^a-z0-9.]/g, "");
@@ -545,48 +555,6 @@ function fuzzyMatchModel(input: string, items: ModelChoice[]): ModelChoice | nul
   return null;
 }
 
-async function selectFromList(
-  rl: ReturnType<typeof createInterface>,
-  items: ModelChoice[],
-  prompt: string,
-  options?: { allowSkip?: boolean; defaultIndex?: number; allowFreeText?: boolean },
-): Promise<string | null> {
-  if (items.length === 0) return null;
-  console.error(prompt);
-  items.forEach((item, i) => {
-    const marker = options?.defaultIndex === i ? " (recommended)" : "";
-    console.error(`  ${i + 1}) ${item.label}${marker}`);
-  });
-  if (options?.allowSkip) {
-    console.error(`  ${items.length + 1}) Skip (use provider default)`);
-  }
-  if (options?.allowFreeText) {
-    console.error(`  Or type a model name (e.g. "sonnet 4", "o4-mini")`);
-  }
-  const max = items.length + (options?.allowSkip ? 1 : 0);
-  while (true) {
-    const raw = (await askLine(rl, "> ")).trim();
-    if (!raw && options?.defaultIndex !== undefined) return items[options.defaultIndex].id;
-    // Try as number first
-    const idx = parseInt(raw, 10) - 1;
-    if (options?.allowSkip && idx === items.length) return null;
-    if (idx >= 0 && idx < items.length) return items[idx].id;
-    // Try free-text match (for model selection)
-    if (options?.allowFreeText && raw && isNaN(parseInt(raw, 10))) {
-      const match = fuzzyMatchModel(raw, items);
-      if (match) {
-        console.error(`  → matched: ${match.label} (${match.id})`);
-        return match.id;
-      }
-      // Accept as custom model ID if it looks like one
-      if (raw.length >= 2) {
-        console.error(`  → using custom model: ${raw}`);
-        return raw;
-      }
-    }
-    console.error(`  Enter 1-${max}${options?.allowFreeText ? " or a model name" : ""}`);
-  }
-}
 
 async function configureCommand(args: Record<string, any>) {
   const configPath = join(projectRoot, ".floe", "config.json");
@@ -597,7 +565,7 @@ async function configureCommand(args: Record<string, any>) {
     if (!defaultProvider) return { ok: false, error: "configure --non-interactive requires --default-provider <claude|codex|copilot>" };
     if (!PROVIDERS.includes(defaultProvider as any)) return { ok: false, error: `Invalid provider: ${defaultProvider}. Must be: ${PROVIDERS.join(", ")}` };
 
-    const config: FloeConfig = { defaultProvider };
+    const config: FloeConfig = { defaultProvider, configured: true };
     if (args.model || args.thinking) {
       config.roles = {};
       for (const role of ["planner", "implementer", "reviewer"] as const) {
@@ -612,135 +580,204 @@ async function configureCommand(args: Record<string, any>) {
     return { ok: true, message: `Wrote ${configPath}`, config };
   }
 
-  // Interactive mode
-  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  // ── Interactive mode using @clack/prompts ────────────────────────
 
-  try {
-    console.error("\nfloe provider configuration");
-    console.error("────────────────────────────\n");
+  p.intro("floe — provider configuration");
 
-    // 1. Default provider
-    console.error("Which provider should workers use by default?");
-    PROVIDERS.forEach((p, i) => console.error(`  ${i + 1}) ${p}   (${PROVIDER_HINTS[p]})`));
+  // Auto-detect which providers are available
+  const hasAnthropic = !!process.env.ANTHROPIC_API_KEY;
+  const hasOpenAI = !!process.env.OPENAI_API_KEY;
+  const detectedDefault = hasAnthropic ? "claude" : hasOpenAI ? "codex" : "copilot";
 
-    let defaultProvider = "";
-    while (!defaultProvider) {
-      const raw = (await askLine(rl, "> ")).trim();
-      const byIndex = PROVIDERS[parseInt(raw, 10) - 1];
-      const byName = PROVIDERS.find(p => p === raw);
-      const resolved = byIndex ?? byName;
-      if (resolved) {
-        defaultProvider = resolved;
-      } else {
-        console.error(`  Invalid choice. Enter 1-${PROVIDERS.length} or a provider name.`);
-      }
-    }
+  // 1. Default provider
+  const defaultProvider = await p.select({
+    message: "Which provider should workers use by default?",
+    initialValue: detectedDefault,
+    options: PROVIDERS.map(prov => ({
+      value: prov,
+      label: prov.charAt(0).toUpperCase() + prov.slice(1),
+      hint: PROVIDER_HINTS[prov],
+    })),
+  });
+  handleCancel(defaultProvider);
 
-    const config: FloeConfig = { defaultProvider, roles: {} };
-    let globalModel: string | null = null;
-    let globalThinking: string | null = null;
+  // 2. Fetch models with spinner
+  const spin = p.spinner();
+  spin.start(`Fetching available models for ${defaultProvider}...`);
+  const defaultModels = await fetchModelsForProvider(defaultProvider as string);
+  const modelSource = defaultModels === CURATED_MODELS[defaultProvider as string] ? "curated" : "API";
+  spin.stop(`Found ${defaultModels.length} models (${modelSource})`);
 
-    // 2. Default model (fetched from API or curated fallback)
-    const defaultModels = await (async () => {
-      console.error(`\nFetching available models for ${defaultProvider}...`);
-      return fetchModelsForProvider(defaultProvider);
-    })();
+  // 3. Model selection
+  let globalModel: string | null = null;
+  if (defaultModels.length > 0) {
+    const modelOptions = [
+      ...defaultModels.map((m, i) => ({
+        value: m.id,
+        label: m.label,
+        hint: i === 0 ? "recommended" : undefined,
+      })),
+      { value: "__custom__", label: "Type a custom model name..." },
+    ];
 
-    if (defaultModels.length > 0) {
-      globalModel = await selectFromList(rl, defaultModels, `\nDefault model for ${defaultProvider}:`, {
-        allowSkip: true,
-        defaultIndex: 0,
-        allowFreeText: true,
-      });
-    } else {
-      // No curated list — prompt for free-text model name
-      console.error(`\nDefault model for ${defaultProvider}:`);
-      console.error(`  Type a model name, or press Enter to skip`);
-      const raw = (await askLine(rl, "> ")).trim();
-      if (raw) globalModel = raw;
-    }
-
-    // 3. Default thinking level
-    globalThinking = await selectFromList(rl, THINKING_LEVELS, "\nDefault reasoning level:", {
-      defaultIndex: 0,
+    const modelChoice = await p.select({
+      message: `Default model for ${defaultProvider}?`,
+      initialValue: defaultModels[0].id,
+      options: modelOptions,
     });
+    handleCancel(modelChoice);
 
-    // 4. Per-role customization
-    console.error(`\nDefault: ${defaultProvider}${globalModel ? ` / ${globalModel}` : ""}${globalThinking && globalThinking !== "normal" ? ` / thinking=${globalThinking}` : ""}`);
-    const customizeRaw = (await askLine(rl, "Customize per role? [y/N] ")).trim().toLowerCase();
-    const customize = customizeRaw === "y" || customizeRaw === "yes";
-
-    if (customize) {
-      for (const role of ["planner", "implementer", "reviewer"] as const) {
-        console.error(`\n── ${role} ──`);
-        const roleConf: Record<string, string> = {};
-
-        // Provider
-        const provChoice = await selectFromList(rl, PROVIDERS.map(p => ({ id: p, label: `${p}   (${PROVIDER_HINTS[p]})` })),
-          `  Provider [${defaultProvider}]:`, { allowSkip: true, defaultIndex: PROVIDERS.indexOf(defaultProvider as any) });
-        const roleProvider = provChoice ?? defaultProvider;
-        if (roleProvider !== defaultProvider) roleConf.provider = roleProvider;
-
-        // Model (fetch for this provider if different)
-        const roleModels = roleProvider !== defaultProvider
-          ? await (async () => { console.error(`  Fetching models for ${roleProvider}...`); return fetchModelsForProvider(roleProvider); })()
-          : defaultModels;
-
-        if (roleModels.length > 0) {
-          const defaultModelIdx = globalModel ? roleModels.findIndex(m => m.id === globalModel) : -1;
-          const modelHint = roleProvider === defaultProvider && globalModel ? ` [${globalModel}]` : "";
-          const roleModel = await selectFromList(rl, roleModels,
-            `  Model${modelHint}:`,
-            { allowSkip: true, defaultIndex: defaultModelIdx >= 0 ? defaultModelIdx : 0, allowFreeText: true });
-          const effectiveModel = roleModel ?? (roleProvider === defaultProvider ? globalModel : null);
-          if (effectiveModel) roleConf.model = effectiveModel;
-        } else {
-          // No curated list — free-text input
-          const modelHint = roleProvider === defaultProvider && globalModel ? ` [${globalModel}]` : "";
-          console.error(`  Model${modelHint}: (type a model name, or Enter to skip)`);
-          const raw = (await askLine(rl, "  > ")).trim();
-          const effectiveModel = raw || (roleProvider === defaultProvider ? globalModel : null);
-          if (effectiveModel) roleConf.model = effectiveModel;
-        }
-
-        // Thinking
-        const defaultThinkIdx = THINKING_LEVELS.findIndex(t => t.id === globalThinking);
-        const roleThinking = await selectFromList(rl, THINKING_LEVELS,
-          `  Reasoning [${globalThinking ?? "normal"}]:`,
-          { allowSkip: true, defaultIndex: defaultThinkIdx >= 0 ? defaultThinkIdx : 0 });
-        const effectiveThinking = roleThinking ?? globalThinking;
-        if (effectiveThinking && effectiveThinking !== globalThinking) roleConf.thinking = effectiveThinking;
-        else if (effectiveThinking) roleConf.thinking = effectiveThinking;
-
-        if (Object.keys(roleConf).length > 0) {
-          (config.roles as any)[role] = roleConf;
-        }
-      }
+    if (modelChoice === "__custom__") {
+      const customModel = await p.text({
+        message: "Enter model name or ID:",
+        placeholder: "e.g. claude-sonnet-4, o4-mini",
+        validate(value) {
+          if (!value || value.length < 2) return "Model name must be at least 2 characters";
+        },
+      });
+      handleCancel(customModel);
+      // Try fuzzy matching against known models
+      const match = fuzzyMatchModel(customModel as string, defaultModels);
+      globalModel = match ? match.id : (customModel as string);
     } else {
-      // Apply global model/thinking to all roles
-      if (globalModel || (globalThinking && globalThinking !== "normal")) {
-        for (const role of ["planner", "implementer", "reviewer"] as const) {
-          const roleConf: Record<string, string> = {};
-          if (globalModel) roleConf.model = globalModel;
-          if (globalThinking && globalThinking !== "normal") roleConf.thinking = globalThinking;
-          (config.roles as any)[role] = roleConf;
+      globalModel = modelChoice as string;
+    }
+  } else {
+    const customModel = await p.text({
+      message: `Default model for ${defaultProvider}?`,
+      placeholder: "Type a model name, or press Enter to skip",
+    });
+    handleCancel(customModel);
+    if (customModel) globalModel = customModel as string;
+  }
+
+  // 4. Thinking level
+  const globalThinking = await p.select({
+    message: "Default reasoning level?",
+    initialValue: "normal",
+    options: [
+      { value: "normal", label: "Normal", hint: "recommended" },
+      { value: "low", label: "Low" },
+      { value: "high", label: "High", hint: "extended thinking" },
+    ],
+  });
+  handleCancel(globalThinking);
+
+  // 5. Per-role customization
+  const config: FloeConfig = { defaultProvider: defaultProvider as string, configured: true, roles: {} };
+
+  const customize = await p.confirm({
+    message: "Customize per role? (planner, implementer, reviewer)",
+    initialValue: false,
+  });
+  handleCancel(customize);
+
+  if (customize) {
+    for (const role of ["planner", "implementer", "reviewer"] as const) {
+      p.log.step(`${role}`);
+      const roleConf: Record<string, string> = {};
+
+      // Provider
+      const roleProvider = await p.select({
+        message: `Provider for ${role}?`,
+        initialValue: defaultProvider as string,
+        options: PROVIDERS.map(prov => ({
+          value: prov,
+          label: prov.charAt(0).toUpperCase() + prov.slice(1),
+          hint: prov === (defaultProvider as string) ? "current default" : PROVIDER_HINTS[prov],
+        })),
+      });
+      handleCancel(roleProvider);
+      if (roleProvider !== defaultProvider) roleConf.provider = roleProvider as string;
+
+      // Model — fetch if different provider
+      const effectiveProvider = roleProvider as string;
+      let roleModels = defaultModels;
+      if (effectiveProvider !== defaultProvider) {
+        spin.start(`Fetching models for ${effectiveProvider}...`);
+        roleModels = await fetchModelsForProvider(effectiveProvider);
+        spin.stop(`Found ${roleModels.length} models`);
+      }
+
+      if (roleModels.length > 0) {
+        const defaultIdx = globalModel ? roleModels.findIndex(m => m.id === globalModel) : 0;
+        const roleModelOptions = [
+          ...roleModels.map((m, i) => ({
+            value: m.id,
+            label: m.label,
+            hint: i === (defaultIdx >= 0 ? defaultIdx : 0) ? "current default" : undefined,
+          })),
+          { value: "__custom__", label: "Type a custom model name..." },
+        ];
+
+        const roleModelChoice = await p.select({
+          message: `Model for ${role}?`,
+          initialValue: defaultIdx >= 0 ? roleModels[defaultIdx].id : roleModels[0].id,
+          options: roleModelOptions,
+        });
+        handleCancel(roleModelChoice);
+
+        if (roleModelChoice === "__custom__") {
+          const custom = await p.text({
+            message: "Enter model name or ID:",
+            placeholder: "e.g. claude-sonnet-4, o4-mini",
+            validate(v) { if (!v || v.length < 2) return "At least 2 characters"; },
+          });
+          handleCancel(custom);
+          const match = fuzzyMatchModel(custom as string, roleModels);
+          roleConf.model = match ? match.id : (custom as string);
+        } else {
+          roleConf.model = roleModelChoice as string;
         }
+      } else {
+        const customModel = await p.text({
+          message: `Model for ${role}?`,
+          placeholder: "Type a model name, or press Enter to skip",
+        });
+        handleCancel(customModel);
+        if (customModel) roleConf.model = customModel as string;
+      }
+
+      // Thinking
+      const roleThinking = await p.select({
+        message: `Reasoning level for ${role}?`,
+        initialValue: globalThinking as string,
+        options: [
+          { value: "normal", label: "Normal" },
+          { value: "low", label: "Low" },
+          { value: "high", label: "High", hint: "extended thinking" },
+        ],
+      });
+      handleCancel(roleThinking);
+      if (roleThinking !== "normal") roleConf.thinking = roleThinking as string;
+
+      if (Object.keys(roleConf).length > 0) {
+        (config.roles as any)[role] = roleConf;
       }
     }
-
-    // Clean up empty roles object
-    if (config.roles && Object.keys(config.roles).length === 0) {
-      delete config.roles;
+  } else {
+    // Apply global model/thinking to all roles
+    if (globalModel || (globalThinking !== "normal")) {
+      for (const role of ["planner", "implementer", "reviewer"] as const) {
+        const roleConf: Record<string, string> = {};
+        if (globalModel) roleConf.model = globalModel;
+        if (globalThinking !== "normal") roleConf.thinking = globalThinking as string;
+        (config.roles as any)[role] = roleConf;
+      }
     }
-
-    mkdirSync(join(projectRoot, ".floe"), { recursive: true });
-    writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
-    console.error(`\n✓ Wrote ${configPath}\n`);
-
-    return { ok: true, message: `Wrote ${configPath}`, config };
-  } finally {
-    rl.close();
   }
+
+  // Clean up empty roles object
+  if (config.roles && Object.keys(config.roles).length === 0) {
+    delete config.roles;
+  }
+
+  mkdirSync(join(projectRoot, ".floe"), { recursive: true });
+  writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
+
+  p.outro(`Configuration saved to ${configPath}`);
+
+  return { ok: true, message: `Wrote ${configPath}`, config };
 }
 
 // ─── Config management commands ──────────────────────────────────────

@@ -1,0 +1,14 @@
+{
+  "defaultProvider": "copilot",
+  "roles": {
+    "planner": {
+      "model": "claude-sonnet-4"
+    },
+    "implementer": {
+      "model": "claude-sonnet-4"
+    },
+    "reviewer": {
+      "model": "claude-sonnet-4"
+    }
+  }
+}

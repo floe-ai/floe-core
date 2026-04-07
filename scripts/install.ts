@@ -391,30 +391,21 @@ async function main() {
       console.log(`  ⚠ dependencies skipped (run 'bun install' in .floe/ manually)`);
     }
 
-    // ── Step 5: Provider configuration ──────────────────────────────
+    // ── Step 5: Write smart-default config ─────────────────────────────
 
     const configPath = join(projectRoot, ".floe", "config.json");
     if (!existsSync(configPath)) {
-      if (!nonInteractive && process.stdout.isTTY) {
-        console.log("");
-        const wantConfigure = await confirm(rl, "Set up provider configuration now?");
-        if (wantConfigure) {
-          try {
-            execSync(
-              `bun run "${join(projectRoot, ".floe", "bin", "floe.ts")}" configure`,
-              { cwd: projectRoot, stdio: "inherit", timeout: 120_000 }
-            );
-            console.log(`  ✓ provider configuration saved`);
-          } catch {
-            console.log(`  ⚠ provider configuration skipped`);
-            console.log(`    Run later: bun run .floe/bin/floe.ts configure`);
-          }
-        } else {
-          console.log(`  → Run later: bun run .floe/bin/floe.ts configure`);
-        }
-      } else {
-        console.log(`  → Run: bun run .floe/bin/floe.ts configure  (set up providers)`);
-      }
+      // Auto-detect best default provider from environment
+      const hasAnthropic = !!process.env.ANTHROPIC_API_KEY;
+      const hasOpenAI = !!process.env.OPENAI_API_KEY;
+      let defaultProvider = "copilot"; // safest default — uses GitHub CLI creds
+      if (hasAnthropic) defaultProvider = "claude";
+      else if (hasOpenAI) defaultProvider = "codex";
+
+      const config = { defaultProvider, configured: false };
+      mkdirSync(join(projectRoot, ".floe"), { recursive: true });
+      writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
+      console.log(`  ✓ default config written (provider: ${defaultProvider})`);
     }
 
     // ── Step 6: Validate (optional) ───────────────────────────────────
@@ -438,9 +429,7 @@ async function main() {
     }
 
     console.log(`\n✓ floe-core installed. Open your agent (codex, claude, or copilot) to start.`);
-    if (!existsSync(configPath)) {
-      console.log(`  Remember to configure providers: bun run .floe/bin/floe.ts configure`);
-    }
+    console.log(`  Model configuration will be guided on first run.`);
     console.log("");
   } finally {
     rl.close();
