@@ -515,11 +515,36 @@ function askLine(rl: ReturnType<typeof createInterface>, question: string): Prom
   return new Promise((resolve) => rl.question(question, resolve));
 }
 
+/** Fuzzy-match user text against model list. Returns best match or null. */
+function fuzzyMatchModel(input: string, items: ModelChoice[]): ModelChoice | null {
+  const q = input.toLowerCase().replace(/[^a-z0-9.]/g, "");
+  if (!q) return null;
+  // Exact id match
+  const exact = items.find(m => m.id.toLowerCase() === input.toLowerCase());
+  if (exact) return exact;
+  // Substring match on id or label
+  const matches = items.filter(m =>
+    m.id.toLowerCase().includes(q) || m.label.toLowerCase().replace(/[^a-z0-9.]/g, "").includes(q)
+  );
+  if (matches.length === 1) return matches[0];
+  // Partial token match (e.g. "sonnet 4.6" matches "claude-sonnet-4.6-...")
+  const tokens = input.toLowerCase().split(/[\s\-_]+/).filter(Boolean);
+  if (tokens.length > 0) {
+    const tokenMatches = items.filter(m => {
+      const haystack = `${m.id} ${m.label}`.toLowerCase();
+      return tokens.every(t => haystack.includes(t));
+    });
+    if (tokenMatches.length === 1) return tokenMatches[0];
+    if (tokenMatches.length > 1) return null; // ambiguous
+  }
+  return null;
+}
+
 async function selectFromList(
   rl: ReturnType<typeof createInterface>,
   items: ModelChoice[],
   prompt: string,
-  options?: { allowSkip?: boolean; defaultIndex?: number },
+  options?: { allowSkip?: boolean; defaultIndex?: number; allowFreeText?: boolean },
 ): Promise<string | null> {
   if (items.length === 0) return null;
   console.error(prompt);
@@ -530,14 +555,31 @@ async function selectFromList(
   if (options?.allowSkip) {
     console.error(`  ${items.length + 1}) Skip (use provider default)`);
   }
+  if (options?.allowFreeText) {
+    console.error(`  Or type a model name (e.g. "sonnet 4", "o4-mini")`);
+  }
   const max = items.length + (options?.allowSkip ? 1 : 0);
   while (true) {
     const raw = (await askLine(rl, "> ")).trim();
     if (!raw && options?.defaultIndex !== undefined) return items[options.defaultIndex].id;
+    // Try as number first
     const idx = parseInt(raw, 10) - 1;
     if (options?.allowSkip && idx === items.length) return null;
     if (idx >= 0 && idx < items.length) return items[idx].id;
-    console.error(`  Enter 1-${max}`);
+    // Try free-text match (for model selection)
+    if (options?.allowFreeText && raw && isNaN(parseInt(raw, 10))) {
+      const match = fuzzyMatchModel(raw, items);
+      if (match) {
+        console.error(`  → matched: ${match.label} (${match.id})`);
+        return match.id;
+      }
+      // Accept as custom model ID if it looks like one
+      if (raw.length >= 2) {
+        console.error(`  → using custom model: ${raw}`);
+        return raw;
+      }
+    }
+    console.error(`  Enter 1-${max}${options?.allowFreeText ? " or a model name" : ""}`);
   }
 }
 
@@ -603,6 +645,7 @@ async function configureCommand(args: Record<string, any>) {
       globalModel = await selectFromList(rl, defaultModels, `\nDefault model for ${defaultProvider}:`, {
         allowSkip: true,
         defaultIndex: 0,
+        allowFreeText: true,
       });
     }
 
@@ -637,7 +680,7 @@ async function configureCommand(args: Record<string, any>) {
           const modelHint = roleProvider === defaultProvider && globalModel ? ` [${globalModel}]` : "";
           const roleModel = await selectFromList(rl, roleModels,
             `  Model${modelHint}:`,
-            { allowSkip: true, defaultIndex: defaultModelIdx >= 0 ? defaultModelIdx : 0 });
+            { allowSkip: true, defaultIndex: defaultModelIdx >= 0 ? defaultModelIdx : 0, allowFreeText: true });
           const effectiveModel = roleModel ?? (roleProvider === defaultProvider ? globalModel : null);
           if (effectiveModel) roleConf.model = effectiveModel;
         }
