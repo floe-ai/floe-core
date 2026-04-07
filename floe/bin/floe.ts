@@ -451,7 +451,12 @@ const CURATED_MODELS: Record<string, ModelChoice[]> = {
     { id: "o4-mini", label: "o4-mini" },
     { id: "gpt-4.1", label: "GPT-4.1" },
   ],
-  copilot: [],
+  copilot: [
+    { id: "gpt-4o", label: "GPT-4o" },
+    { id: "claude-sonnet-4", label: "Claude Sonnet 4" },
+    { id: "o3-mini", label: "o3-mini" },
+    { id: "gpt-4.1", label: "GPT-4.1" },
+  ],
 };
 
 const THINKING_LEVELS: ModelChoice[] = [
@@ -506,7 +511,7 @@ async function fetchModelsForProvider(provider: string): Promise<ModelChoice[]> 
   let models: ModelChoice[];
   if (provider === "claude") models = await fetchClaudeModels();
   else if (provider === "codex") models = await fetchOpenAIModels();
-  else models = [];
+  else models = CURATED_MODELS[provider] ?? [];
   modelCache.set(provider, models);
   return models;
 }
@@ -647,6 +652,12 @@ async function configureCommand(args: Record<string, any>) {
         defaultIndex: 0,
         allowFreeText: true,
       });
+    } else {
+      // No curated list — prompt for free-text model name
+      console.error(`\nDefault model for ${defaultProvider}:`);
+      console.error(`  Type a model name, or press Enter to skip`);
+      const raw = (await askLine(rl, "> ")).trim();
+      if (raw) globalModel = raw;
     }
 
     // 3. Default thinking level
@@ -682,6 +693,13 @@ async function configureCommand(args: Record<string, any>) {
             `  Model${modelHint}:`,
             { allowSkip: true, defaultIndex: defaultModelIdx >= 0 ? defaultModelIdx : 0, allowFreeText: true });
           const effectiveModel = roleModel ?? (roleProvider === defaultProvider ? globalModel : null);
+          if (effectiveModel) roleConf.model = effectiveModel;
+        } else {
+          // No curated list — free-text input
+          const modelHint = roleProvider === defaultProvider && globalModel ? ` [${globalModel}]` : "";
+          console.error(`  Model${modelHint}: (type a model name, or Enter to skip)`);
+          const raw = (await askLine(rl, "  > ")).trim();
+          const effectiveModel = raw || (roleProvider === defaultProvider ? globalModel : null);
           if (effectiveModel) roleConf.model = effectiveModel;
         }
 
@@ -742,7 +760,7 @@ async function listModels(args: Record<string, any>) {
     return { ok: false, error: `Invalid provider: ${provider}. Must be: ${PROVIDERS.join(", ")}` };
   }
   if (provider === "copilot") {
-    return { ok: true, provider, models: [], note: "Copilot model selection is SDK-managed" };
+    return { ok: true, provider, source: "curated", models: CURATED_MODELS.copilot, note: "Copilot supports multiple models via SDK — type any model name if not listed" };
   }
   const models = await fetchModelsForProvider(provider);
   const source = (provider === "claude" && process.env.ANTHROPIC_API_KEY)
