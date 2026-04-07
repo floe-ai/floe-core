@@ -15,6 +15,9 @@
  *   manage-feature-pair  Launch implementer + reviewer pair
  *   check-alignment      Check approach alignment status for a feature
  *   configure            Set up provider defaults (interactive or flags)
+ *   show-config          Show current provider configuration
+ *   list-models          List available models for a provider
+ *   update-config        Update provider/model/thinking configuration
  *
  * Provider resolution order:
  *   1. --provider flag
@@ -679,6 +682,84 @@ async function configureCommand(args: Record<string, any>) {
   }
 }
 
+// ─── Config management commands ──────────────────────────────────────
+
+async function showConfig(_args: Record<string, any>) {
+  const config = loadConfig(projectRoot);
+  if (!config) {
+    return { ok: false, error: "No .floe/config.json found. Run: bun run .floe/bin/floe.ts configure" };
+  }
+  return { ok: true, config };
+}
+
+async function listModels(args: Record<string, any>) {
+  const provider = args.provider;
+  if (!provider) return { ok: false, error: "list-models requires --provider <claude|codex|copilot>" };
+  if (!PROVIDERS.includes(provider as any)) {
+    return { ok: false, error: `Invalid provider: ${provider}. Must be: ${PROVIDERS.join(", ")}` };
+  }
+  if (provider === "copilot") {
+    return { ok: true, provider, models: [], note: "Copilot model selection is SDK-managed" };
+  }
+  const models = await fetchModelsForProvider(provider);
+  const source = (provider === "claude" && process.env.ANTHROPIC_API_KEY)
+    || (provider === "codex" && process.env.OPENAI_API_KEY) ? "api" : "curated";
+  return { ok: true, provider, source, models };
+}
+
+async function updateConfig(args: Record<string, any>) {
+  const configPath = join(projectRoot, ".floe", "config.json");
+  const config = loadConfig(projectRoot) ?? { defaultProvider: "" } as FloeConfig;
+
+  const role = args.role as string | undefined;
+  const provider = args.provider as string | undefined;
+  const model = args.model as string | undefined;
+  const thinking = args.thinking as string | undefined;
+
+  if (!provider && !model && !thinking && !args["default-provider"]) {
+    return { ok: false, error: "update-config requires at least one of: --default-provider, --provider, --model, --thinking" };
+  }
+
+  // Validate provider if given
+  if (provider && !PROVIDERS.includes(provider as any) && provider !== "mock") {
+    return { ok: false, error: `Invalid provider: ${provider}. Must be: ${PROVIDERS.join(", ")}` };
+  }
+
+  // Validate thinking if given
+  const validThinking = ["low", "normal", "high"];
+  if (thinking && !validThinking.includes(thinking)) {
+    return { ok: false, error: `Invalid thinking: ${thinking}. Must be: ${validThinking.join(", ")}` };
+  }
+
+  // Update default provider
+  if (args["default-provider"]) {
+    if (!PROVIDERS.includes(args["default-provider"] as any)) {
+      return { ok: false, error: `Invalid default provider: ${args["default-provider"]}` };
+    }
+    config.defaultProvider = args["default-provider"];
+  }
+
+  // Determine which roles to update
+  const targetRoles: string[] = role === "all"
+    ? ["planner", "implementer", "reviewer"]
+    : role ? [role] : [];
+
+  if (targetRoles.length > 0 && (provider || model || thinking)) {
+    if (!config.roles) config.roles = {};
+    for (const r of targetRoles) {
+      const existing = (config.roles as any)[r] ?? {};
+      if (provider) existing.provider = provider;
+      if (model) existing.model = model;
+      if (thinking) existing.thinking = thinking;
+      (config.roles as any)[r] = existing;
+    }
+  }
+
+  mkdirSync(join(projectRoot, ".floe"), { recursive: true });
+  writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
+  return { ok: true, message: `Updated ${configPath}`, config };
+}
+
 // ─── CLI dispatch ────────────────────────────────────────────────────
 
 const [command, ...rest] = Bun.argv.slice(2);
@@ -722,6 +803,9 @@ async function main() {
     "manage-feature-pair": manageFeaturePair,
     "check-alignment": checkAlignment,
     "configure": configureCommand,
+    "show-config": showConfig,
+    "list-models": listModels,
+    "update-config": updateConfig,
   };
 
   const handler = commands[command];

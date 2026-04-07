@@ -177,11 +177,30 @@ bun run .floe/bin/floe.ts check-alignment --feature <id>
 
 # Configuration
 bun run .floe/bin/floe.ts configure                     # interactive provider setup
+bun run .floe/bin/floe.ts show-config                    # show current config
+bun run .floe/bin/floe.ts list-models --provider <name>  # list available models
+bun run .floe/bin/floe.ts update-config --role <role|all> --model <id> [--thinking <level>]
 ```
 
 When launching a Planner, always provide `--scope` (release or epic) and `--target` (the ID). The Planner will decompose only that level.
 
 When launching execution, use `manage-feature-pair` which validates that the feature exists before proceeding.
+
+---
+
+## Provider & Model Configuration Handling
+
+When the user mentions a model, provider, or thinking level in plain text (e.g. "use opus", "switch implementer to codex", "turn on high thinking"), treat it as a config correction request:
+
+1. **Check current config**: `bun run .floe/bin/floe.ts show-config`
+2. **Query available models**: `bun run .floe/bin/floe.ts list-models --provider <provider>`
+3. **Match the user's input** to the closest valid model ID from the list (e.g. "opus" → `claude-opus-4-20250514`, "4.1" → `gpt-4.1`)
+4. **Apply the change**: `bun run .floe/bin/floe.ts update-config --role <role|all> --model <exact-id> [--thinking <level>]`
+5. **Confirm** to the user what was changed
+
+If the user's input is ambiguous (could match multiple models), show the options and ask. If it matches nothing, show the available models from `list-models` and ask the user to pick.
+
+If no `.floe/config.json` exists yet, offer to run the full interactive `configure` instead.
 
 ---
 
