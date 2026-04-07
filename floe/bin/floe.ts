@@ -5,10 +5,12 @@
  * Usage: bun run .floe/bin/floe.ts <command> [options]
  *
  * Commands:
- *   launch-worker        Launch a new worker session
+ *   launch-worker        Launch a new worker session (optional --message, --async)
  *   resume-worker        Resume an existing session
- *   message-worker       Send a message to an active worker
+ *   message-worker       Send a message to an active worker (optional --async)
  *   get-worker-status    Get session status
+ *   get-worker-result    Get async worker result (--session or --result-path)
+ *   wait-worker          Block until async worker completes (--session or --result-path, --timeout)
  *   replace-worker       Stop and re-launch a worker
  *   stop-worker          Stop a worker session
  *   list-active-workers  List all active sessions
@@ -24,7 +26,7 @@
  *   2. FLOE_PROVIDER env var
  *   3. .floe/config.json role-specific override
  *   4. .floe/config.json defaultProvider
- *   5. Error (no silent mock default)
+ *   5. Error (no provider configured)
  *
  * Provider env vars:
  *   ANTHROPIC_API_KEY   — required for Claude adapter
@@ -36,15 +38,14 @@ import { parseArgs } from "node:util";
 import { createInterface } from "node:readline";
 import * as p from "@clack/prompts";
 import { SessionRegistry } from "../runtime/registry.ts";
+import { ResultStore } from "../runtime/results.ts";
 import type { ProviderAdapter } from "../runtime/adapters/interface.ts";
-import { MockAdapter } from "../runtime/adapters/mock.ts";
 import { readFileSync, existsSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 
 // ─── Adapter registry ────────────────────────────────────────────────
 
 const adapters = new Map<string, ProviderAdapter>();
-adapters.set("mock", new MockAdapter());
 
 const adapterLoadErrors = new Map<string, string>();
 
@@ -219,6 +220,70 @@ function getAlignmentStatus(featureId: string, projectRoot: string): {
 
 const projectRoot = findProjectRoot();
 const registry = new SessionRegistry(projectRoot);
+const resultStore = new ResultStore(projectRoot);
+
+/**
+ * Ensure a session is loaded in the adapter's in-memory map.
+ * Each CLI invocation is a fresh process — the adapter's Map is empty.
+ * This transparently resumes the session from the registry so callers
+ * (message-worker, get-worker-status, etc.) don't need to worry about it.
+ */
+async function ensureResumed(
+  adapter: ProviderAdapter,
+  sessionId: string,
+  stored: import("../runtime/types.ts").WorkerSession
+): Promise<void> {
+  if (adapter.hasSession(sessionId)) return;
+
+  let roleContent: string | undefined;
+  if (stored.roleContentPath && existsSync(stored.roleContentPath)) {
+    try { roleContent = readFileSync(stored.roleContentPath, "utf-8"); } catch {}
+  }
+
+  const session = await adapter.resumeSession(
+    sessionId,
+    stored,
+    roleContent ? { roleContent } : undefined
+  );
+  registry.update(sessionId, { status: session.status, updatedAt: session.updatedAt, metadata: session.metadata });
+}
+
+/**
+ * Dispatch a message (or launch+message) in a background subprocess.
+ * Returns immediately with the result file path for polling.
+ */
+function dispatchAsync(args: Record<string, any>): { ok: true; dispatched: true; sessionId?: string; resultPath: string } {
+  const sessionId = args.session as string | undefined;
+  const resultPath = resultStore.writePending(sessionId ?? "launch");
+
+  const asyncWorkerPath = join(dirname(new URL(import.meta.url).pathname), "async-worker.ts");
+
+  const subArgs: string[] = ["run", asyncWorkerPath, "--result-path", resultPath];
+
+  if (args._launch) {
+    subArgs.push("--launch");
+    if (args.role) subArgs.push("--role", args.role);
+    if (args.provider) subArgs.push("--provider", args.provider);
+    if (args.feature) subArgs.push("--feature", args.feature);
+    if (args.epic) subArgs.push("--epic", args.epic);
+    if (args.release) subArgs.push("--release", args.release);
+    if (args.context) subArgs.push("--context", args.context);
+    if (args.model) subArgs.push("--model", args.model);
+    if (args.thinking) subArgs.push("--thinking", args.thinking);
+  } else {
+    if (sessionId) subArgs.push("--session", sessionId);
+  }
+
+  if (args.message) subArgs.push("--message", args.message);
+
+  const child = Bun.spawn(["bun", ...subArgs], {
+    cwd: projectRoot,
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  child.unref();
+
+  return { ok: true, dispatched: true, sessionId, resultPath };
+}
 
 async function launchWorker(args: Record<string, any>) {
   const role = args.role;
@@ -256,6 +321,11 @@ async function launchWorker(args: Record<string, any>) {
 
   const { content: roleContent, path: roleContentPath } = readRoleContent(role, projectRoot);
 
+  // Async dispatch: fork a background subprocess and return immediately
+  if (args.async && args.message) {
+    return dispatchAsync({ ...args, _launch: true, provider: resolved.provider, model: resolved.model, thinking: resolved.thinking });
+  }
+
   const session = await adapter.startSession({
     role,
     provider: resolved.provider as any,
@@ -270,7 +340,27 @@ async function launchWorker(args: Record<string, any>) {
   });
 
   registry.register(session);
-  return { ok: true, sessionId: session.id, role: session.role, provider: session.provider, status: session.status };
+
+  // If --message provided, send the initial task in the same process
+  const result: Record<string, any> = {
+    ok: true,
+    sessionId: session.id,
+    role: session.role,
+    provider: session.provider,
+    status: session.status,
+  };
+
+  if (args.message) {
+    const msgResult = await adapter.sendMessage(session.id, args.message);
+    const now = new Date().toISOString();
+    const fresh = adapter.getSession(session.id);
+    registry.update(session.id, { lastMessageAt: now, metadata: fresh?.metadata ?? session.metadata });
+    result.content = msgResult.content;
+    result.finishReason = msgResult.finishReason;
+    result.usage = msgResult.usage;
+  }
+
+  return result;
 }
 
 async function resumeWorker(args: Record<string, any>) {
@@ -280,19 +370,9 @@ async function resumeWorker(args: Record<string, any>) {
   const { adapter, error } = getAdapter(stored.provider);
   if (!adapter) return { ok: false, error };
 
-  let roleContent: string | undefined;
-  if (stored.roleContentPath && existsSync(stored.roleContentPath)) {
-    try { roleContent = readFileSync(stored.roleContentPath, "utf-8"); } catch {}
-  }
-
-  const session = await adapter.resumeSession(
-    args.session,
-    stored,
-    roleContent ? { roleContent } : undefined
-  );
-
-  registry.update(args.session, { status: session.status, updatedAt: session.updatedAt });
-  return { ok: true, sessionId: session.id, status: session.status };
+  await ensureResumed(adapter, args.session, stored);
+  const updated = registry.get(args.session);
+  return { ok: true, sessionId: updated?.id ?? args.session, status: updated?.status ?? "active" };
 }
 
 async function messageWorker(args: Record<string, any>) {
@@ -317,11 +397,19 @@ async function messageWorker(args: Record<string, any>) {
     }
   }
 
+  // Async dispatch: fork a background subprocess and return immediately
+  if (args.async) {
+    return dispatchAsync(args);
+  }
+
+  // Auto-resume: each CLI invocation is a fresh process with empty adapter state
+  await ensureResumed(adapter, args.session, stored);
+
   const result = await adapter.sendMessage(args.session, args.message);
   const now = new Date().toISOString();
 
-  const updated = registry.get(args.session);
-  registry.update(args.session, { lastMessageAt: now, metadata: updated?.metadata });
+  const fresh = adapter.getSession(args.session);
+  registry.update(args.session, { lastMessageAt: now, metadata: fresh?.metadata });
 
   return { ok: true, sessionId: args.session, content: result.content, finishReason: result.finishReason, usage: result.usage };
 }
@@ -333,6 +421,7 @@ async function getWorkerStatus(args: Record<string, any>) {
   const { adapter, error } = getAdapter(stored.provider);
   if (!adapter) return { ok: false, error };
 
+  await ensureResumed(adapter, args.session, stored);
   const status = await adapter.getStatus(args.session);
   return { ok: true, sessionId: args.session, role: stored.role, provider: stored.provider, status, featureId: stored.featureId };
 }
@@ -341,8 +430,10 @@ async function replaceWorker(args: Record<string, any>) {
   const stored = registry.get(args.session);
   if (!stored) return { ok: false, error: `Session not found: ${args.session}` };
 
-  const adapter = adapters.get(stored.provider);
+  const { adapter, error } = getAdapter(stored.provider);
   if (adapter) {
+    // Best-effort resume so stop/close can clean up provider resources
+    await ensureResumed(adapter, args.session, stored).catch(() => {});
     await adapter.stopSession(args.session).catch(() => {});
     await adapter.closeSession(args.session).catch(() => {});
   }
@@ -363,8 +454,9 @@ async function stopWorker(args: Record<string, any>) {
   const stored = registry.get(args.session);
   if (!stored) return { ok: false, error: `Session not found: ${args.session}` };
 
-  const adapter = adapters.get(stored.provider);
+  const { adapter, error } = getAdapter(stored.provider);
   if (adapter) {
+    await ensureResumed(adapter, args.session, stored).catch(() => {});
     await adapter.stopSession(args.session).catch(() => {});
     await adapter.closeSession(args.session).catch(() => {});
   }
@@ -385,6 +477,58 @@ async function listActiveWorkers(args: Record<string, any>) {
       featureId: s.featureId, createdAt: s.createdAt, lastMessageAt: s.lastMessageAt,
     })),
   };
+}
+
+async function getWorkerResult(args: Record<string, any>) {
+  const sessionId = args.session as string;
+  const resultPath = args["result-path"] as string;
+
+  if (resultPath) {
+    const result = resultStore.read(resultPath);
+    if (!result) return { ok: false, error: `Result file not found: ${resultPath}` };
+    return { ok: true, ...result };
+  }
+
+  if (!sessionId) return { ok: false, error: "get-worker-result requires --session <id> or --result-path <path>" };
+
+  const latest = resultStore.latest(sessionId);
+  if (!latest) return { ok: false, error: `No results found for session: ${sessionId}` };
+  return { ok: true, resultPath: latest.path, ...latest.result };
+}
+
+async function waitWorker(args: Record<string, any>) {
+  const sessionId = args.session as string;
+  const resultPath = args["result-path"] as string;
+  const timeoutMs = parseInt(args.timeout ?? "300000", 10); // default 5 minutes
+  const pollIntervalMs = 2000;
+
+  if (!sessionId && !resultPath) {
+    return { ok: false, error: "wait-worker requires --session <id> or --result-path <path>" };
+  }
+
+  const startTime = Date.now();
+  while (Date.now() - startTime < timeoutMs) {
+    let result: import("../runtime/results.ts").WorkerResult | null = null;
+    let rPath = resultPath;
+
+    if (resultPath) {
+      result = resultStore.read(resultPath);
+    } else {
+      const latest = resultStore.latest(sessionId);
+      if (latest) {
+        result = latest.result;
+        rPath = latest.path;
+      }
+    }
+
+    if (result && result.status !== "pending") {
+      return { ok: true, resultPath: rPath, ...result };
+    }
+
+    await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+  }
+
+  return { ok: false, error: "Timed out waiting for worker result", timeoutMs };
 }
 
 async function manageFeaturePair(args: Record<string, any>) {
@@ -819,7 +963,7 @@ async function updateConfig(args: Record<string, any>) {
   }
 
   // Validate provider if given
-  if (provider && !PROVIDERS.includes(provider as any) && provider !== "mock") {
+  if (provider && !PROVIDERS.includes(provider as any)) {
     return { ok: false, error: `Invalid provider: ${provider}. Must be: ${PROVIDERS.join(", ")}` };
   }
 
@@ -883,6 +1027,9 @@ const { values: opts } = parseArgs({
     "non-interactive": { type: "boolean" },
     model: { type: "string" },
     thinking: { type: "string" },
+    async: { type: "boolean" },
+    "result-path": { type: "string" },
+    timeout: { type: "string" },
   },
   strict: false,
 });
@@ -898,6 +1045,8 @@ async function main() {
     "replace-worker": replaceWorker,
     "stop-worker": stopWorker,
     "list-active-workers": listActiveWorkers,
+    "get-worker-result": getWorkerResult,
+    "wait-worker": waitWorker,
     "manage-feature-pair": manageFeaturePair,
     "check-alignment": checkAlignment,
     "configure": configureCommand,

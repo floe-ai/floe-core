@@ -121,15 +121,20 @@ export class CopilotAdapter implements ProviderAdapter {
     return new Date().toISOString();
   }
 
+  hasSession(sessionId: string): boolean {
+    return this.sessions.has(sessionId);
+  }
+
   async startSession(config: WorkerConfig): Promise<WorkerSession> {
     const client = await this.createClient();
     await client.start();
 
-    const systemMessage = config.roleContent
-      ? {
-          content: config.roleContent +
-            (config.contextAddendum ? `\n\n${config.contextAddendum}` : ""),
-        }
+    const roleContentFull = config.roleContent
+      ? config.roleContent + (config.contextAddendum ? `\n\n${config.contextAddendum}` : "")
+      : undefined;
+
+    const systemMessage = roleContentFull
+      ? { content: roleContentFull }
       : undefined;
 
     const copilotSession = await client.createSession({
@@ -157,6 +162,7 @@ export class CopilotAdapter implements ProviderAdapter {
         copilotSessionId: copilotSession.sessionId,
         workspacePath: copilotSession.workspacePath,
         model: config.model,
+        roleContent: roleContentFull,
       },
     };
 
@@ -167,7 +173,7 @@ export class CopilotAdapter implements ProviderAdapter {
   async resumeSession(
     sessionId: string,
     storedSession: WorkerSession,
-    _config?: Partial<WorkerConfig>
+    config?: Partial<WorkerConfig>
   ): Promise<WorkerSession> {
     const existing = this.sessions.get(sessionId);
     if (existing) {
@@ -195,6 +201,22 @@ export class CopilotAdapter implements ProviderAdapter {
       onPermissionRequest: this.approveAll,
       ...(storedModel ? { model: storedModel } : {}),
     });
+
+    // Re-inject role content as a context reminder after cross-process resume.
+    // Infinite sessions may not faithfully preserve the original system message,
+    // so we send the role content as a user message to re-establish context.
+    // Keep the injected message minimal to avoid wasting context tokens.
+    const roleContent =
+      config?.roleContent ??
+      (storedSession.metadata?.roleContent as string | undefined);
+
+    if (roleContent) {
+      await copilotSession.sendAndWait({
+        prompt: `[System context — resumed session. Your role definition follows.]\n\n${roleContent}\n\nReply with only: "Ready."`,
+      }).catch(() => {
+        // Best-effort: if re-injection fails, the session still works
+      });
+    }
 
     const now = this.now();
     const resumedSession: WorkerSession = {
@@ -268,6 +290,10 @@ export class CopilotAdapter implements ProviderAdapter {
         reject(err);
       });
     });
+  }
+
+  getSession(sessionId: string): WorkerSession | undefined {
+    return this.sessions.get(sessionId)?.session;
   }
 
   async getStatus(sessionId: string): Promise<WorkerStatus> {

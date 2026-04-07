@@ -38,6 +38,10 @@ export class MockAdapter implements ProviderAdapter {
     return new Date().toISOString();
   }
 
+  hasSession(sessionId: string): boolean {
+    return this.sessions.has(sessionId);
+  }
+
   async startSession(config: WorkerConfig): Promise<WorkerSession> {
     const id = this.generateId();
     const now = this.now();
@@ -145,6 +149,10 @@ export class MockAdapter implements ProviderAdapter {
     };
 
     handlers.onComplete?.(result, { type: "message_complete", sessionId, data: result });
+  }
+
+  getSession(sessionId: string): WorkerSession | undefined {
+    return this.sessions.get(sessionId)?.session;
   }
 
   async getStatus(sessionId: string): Promise<WorkerStatus> {

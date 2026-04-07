@@ -117,3 +117,13 @@ bun run .floe/scripts/summary.ts create --data '{
   "next_agent_guidance": "Foreman can now select the first ready feature for execution."
 }'
 ```
+
+---
+
+## Execution Context
+
+You are a worker session launched by the Foreman. Your response is returned through the floe CLI to the Foreman.
+
+- **Take the time you need.** Thorough decomposition is more important than speed. Your response may take several minutes — that is expected and normal.
+- **Write all artefacts before responding.** Your final response text should summarise what you created, not propose what to create. The Foreman expects artefacts to already exist when it reads your response.
+- **Do not ask the Foreman questions.** You cannot have a conversation. If you need information, read it from the repo. If information is genuinely missing, note it in the summary and stop.

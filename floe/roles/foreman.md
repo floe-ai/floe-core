@@ -178,11 +178,19 @@ Use the floe CLI to manage worker sessions. Provider configuration lives in `.fl
 ```bash
 # Launch workers (provider resolved from config, env, or --provider flag)
 bun run .floe/bin/floe.ts launch-worker --role planner --scope <release|epic> --target <id>
+bun run .floe/bin/floe.ts launch-worker --role planner --scope <release|epic> --target <id> --message "<task>"
 bun run .floe/bin/floe.ts manage-feature-pair --feature <id>
+
+# Send messages to workers
+bun run .floe/bin/floe.ts message-worker --session <id> --message "<msg>"
+bun run .floe/bin/floe.ts message-worker --session <id> --message "<msg>" --async
+
+# Async result polling
+bun run .floe/bin/floe.ts get-worker-result --session <id>
+bun run .floe/bin/floe.ts wait-worker --session <id> [--timeout <ms>]
 
 # Worker lifecycle
 bun run .floe/bin/floe.ts resume-worker --session <id>
-bun run .floe/bin/floe.ts message-worker --session <id> --message "<msg>"
 bun run .floe/bin/floe.ts get-worker-status --session <id>
 bun run .floe/bin/floe.ts replace-worker --session <id>
 bun run .floe/bin/floe.ts stop-worker --session <id>
@@ -201,6 +209,93 @@ bun run .floe/bin/floe.ts update-config --role <role|all> --model <id> [--thinki
 When launching a Planner, always provide `--scope` (release or epic) and `--target` (the ID). The Planner will decompose only that level.
 
 When launching execution, use `manage-feature-pair` which validates that the feature exists before proceeding.
+
+---
+
+## Worker Session Lifecycle (critical — read this)
+
+Each CLI invocation is a **separate process**. Sessions survive across invocations because:
+1. Session metadata is persisted to `.floe/state/sessions.json`
+2. Provider SDKs store conversation state on disk (thread files, infinite sessions, JSONL)
+3. The CLI automatically resumes sessions when needed (transparent to you)
+
+### Launch + Task Pattern
+
+When launching a worker that needs an immediate task, **always use `--message`** to combine launch and task in one call:
+
+```bash
+# PREFERRED: Atomic launch + task
+bun run .floe/bin/floe.ts launch-worker --role planner --scope release --target rel-001 \
+  --message "Decompose this release into epics. Read the release: bun run .floe/scripts/artefact.ts get release rel-001"
+
+# ALSO VALID: Separate launch then message (two commands)
+bun run .floe/bin/floe.ts launch-worker --role planner --scope release --target rel-001
+# ... then later:
+bun run .floe/bin/floe.ts message-worker --session <returned-id> --message "<task>"
+```
+
+### Async Workers (for long-running tasks)
+
+Worker responses (planning, implementing, reviewing) **take minutes, not seconds**. For long-running tasks, use `--async` to avoid blocking:
+
+```bash
+# Send task asynchronously — returns immediately
+bun run .floe/bin/floe.ts launch-worker --role planner --scope release --target rel-001 \
+  --message "<task>" --async
+# Returns: { ok: true, dispatched: true, resultPath: "..." }
+
+# Poll for result
+bun run .floe/bin/floe.ts get-worker-result --session <id>
+# Returns: { status: "pending" | "complete" | "error", content: "..." }
+
+# Or block until complete (with timeout)
+bun run .floe/bin/floe.ts wait-worker --session <id> --timeout 600000
+```
+
+**When to use `--async`:**
+- Planner decomposition (may take 2-10 minutes)
+- Implementer coding tasks (may take 5-30 minutes)
+- Reviewer evaluation (may take 2-10 minutes)
+
+**When to use synchronous (no `--async`):**
+- Short queries ("what is the status of X?")
+- Acknowledgements
+- Context probes
+
+### Expected Flow: Plan Mode
+
+```bash
+# 1. Launch planner with task (async for long decomposition)
+bun run .floe/bin/floe.ts launch-worker --role planner --scope release --target rel-001 \
+  --message "Decompose this release into epics..." --async
+
+# 2. Poll or wait for completion
+bun run .floe/bin/floe.ts get-worker-result --session <planner-id>
+
+# 3. Once complete, inspect the created artefacts
+bun run .floe/scripts/artefact.ts list epic
+```
+
+### Expected Flow: Execute Mode
+
+```bash
+# 1. Launch implementer + reviewer pair
+bun run .floe/bin/floe.ts manage-feature-pair --feature feat-001
+
+# 2. Message implementer to propose approach (async)
+bun run .floe/bin/floe.ts message-worker --session <impl-id> \
+  --message "Read the feature and propose your execution approach..." --async
+
+# 3. Poll for implementer's approach proposal
+bun run .floe/bin/floe.ts get-worker-result --session <impl-id>
+
+# 4. Message reviewer to evaluate approach
+bun run .floe/bin/floe.ts message-worker --session <rev-id> \
+  --message "Evaluate the implementer's approach proposal..." --async
+
+# 5. Poll for reviewer's verdict
+bun run .floe/bin/floe.ts get-worker-result --session <rev-id>
+```
 
 ---
 

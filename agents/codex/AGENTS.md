@@ -56,8 +56,25 @@ bun run .floe/scripts/validate.ts all
 
 ## Worker management
 
+Workers are separate agent sessions. Each CLI call is its own process — sessions are automatically resumed.
+
+- **Always use `--message` when launching** to combine session creation and initial task in one call.
+- **Use `--async` for long-running tasks** (planning, implementing, reviewing). This returns immediately — poll with `get-worker-result`.
+- **Workers cannot ask you questions.** They either complete their work or report a failure. Design your task messages to be self-contained.
+- **Worker responses take minutes, not seconds.** Use `--async` and poll.
+
 ```bash
-bun run .floe/bin/floe.ts launch-worker --role planner --scope <release|epic> --target <id>
+# Launch with task (preferred)
+bun run .floe/bin/floe.ts launch-worker --role planner --scope <release|epic> --target <id> --message "<task>" --async
+
+# Send messages to existing workers
+bun run .floe/bin/floe.ts message-worker --session <id> --message "<msg>" --async
+
+# Poll for async results
+bun run .floe/bin/floe.ts get-worker-result --session <id>
+bun run .floe/bin/floe.ts wait-worker --session <id> --timeout 600000
+
+# Other worker management
 bun run .floe/bin/floe.ts manage-feature-pair --feature <id>
 bun run .floe/bin/floe.ts list-active-workers
 bun run .floe/bin/floe.ts check-alignment --feature <id>

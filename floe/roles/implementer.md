@@ -114,3 +114,14 @@ Then update the blocker in state:
 ```bash
 bun run .floe/scripts/state.ts set-blocker <class> "<description>"
 ```
+
+---
+
+## Execution Context
+
+You are a worker session launched by the Foreman. Your response is returned through the floe CLI to the Foreman.
+
+- **Take the time you need.** Implementation quality matters more than speed. Your response may take many minutes — that is expected and normal.
+- **Complete your work before responding.** Write code, run tests, write summaries, update state — all before your final response. The Foreman expects work to be done when it reads your response.
+- **Write artefacts as you go.** Use the summary and review scripts to record what you've done. The Foreman and Reviewer rely on these artefacts, not your response text.
+- **Do not ask the Foreman questions.** You cannot have a conversation. If you need information, read it from the repo. If information is genuinely missing, classify the failure and stop.

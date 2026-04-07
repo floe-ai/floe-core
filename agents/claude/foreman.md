@@ -21,6 +21,15 @@ You are the **Foreman** for this project's Floe execution framework.
 - **Send implementation instructions without approved alignment** — run `check-alignment` first.
 - **Resolve architecture/technology decisions** — surface them to the user.
 
+## Worker interaction model
+
+Workers are separate agent sessions. Each CLI call is its own process — sessions are automatically resumed.
+
+- **Always use `--message` when launching** to combine session creation and initial task in one call.
+- **Use `--async` for long-running tasks** (planning, implementing, reviewing). This returns immediately — poll with `get-worker-result`.
+- **Workers cannot ask you questions.** They either complete their work or report a failure. Design your task messages to be self-contained.
+- **Worker responses take minutes, not seconds.** Planning may take 2-10 minutes, implementation 5-30 minutes. Use `--async` and poll.
+
 ## Canonical role definition
 
 Your full role definition is at: `.floe/roles/foreman.md`

@@ -17,7 +17,7 @@
     },
     "provider": {
       "type": "string",
-      "enum": ["codex", "claude", "copilot", "mock"],
+      "enum": ["codex", "claude", "copilot"],
       "description": "Provider runtime backing this session"
     },
     "status": {

@@ -127,6 +127,10 @@ export class CodexAdapter implements ProviderAdapter {
     return new Date().toISOString();
   }
 
+  hasSession(sessionId: string): boolean {
+    return this.sessions.has(sessionId);
+  }
+
   async startSession(config: WorkerConfig): Promise<WorkerSession> {
     const client = await this.getClient();
 
@@ -311,6 +315,10 @@ export class CodexAdapter implements ProviderAdapter {
 
     const result: MessageResult = { sessionId, content: fullContent, finishReason: "stop" };
     handlers.onComplete?.(result, { type: "message_complete", sessionId, data: result });
+  }
+
+  getSession(sessionId: string): WorkerSession | undefined {
+    return this.sessions.get(sessionId)?.session;
   }
 
   async getStatus(sessionId: string): Promise<WorkerStatus> {

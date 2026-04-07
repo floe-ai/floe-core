@@ -27,7 +27,7 @@ const p = paths();
 const sessionsFile = join(p.state, "sessions.json");
 
 const ROLES = ["foreman", "planner", "implementer", "reviewer"] as const;
-const PROVIDERS = ["codex", "claude", "copilot", "mock"] as const;
+const PROVIDERS = ["codex", "claude", "copilot"] as const;
 const STATUSES = ["starting", "active", "idle", "stopped", "failed"] as const;
 
 /** Normalise any legacy snake_case fields to camelCase. */

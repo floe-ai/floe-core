@@ -19,6 +19,12 @@ export interface ProviderAdapter {
   readonly provider: string;
 
   /**
+   * Check whether a session is loaded in the adapter's in-memory map.
+   * Used to determine if resumeSession() must be called before sendMessage().
+   */
+  hasSession(sessionId: string): boolean;
+
+  /**
    * Start a new worker session with the given configuration.
    * The adapter is responsible for injecting roleContent as the session
    * system prompt in whatever way the provider SDK supports.
@@ -64,6 +70,13 @@ export interface ProviderAdapter {
    * Get the current lifecycle status of a session.
    */
   getStatus(sessionId: string): Promise<WorkerStatus>;
+
+  /**
+   * Get the adapter's current in-memory view of the session.
+   * Returns the session object with up-to-date metadata (e.g. thread IDs
+   * captured during sendMessage). Returns undefined if not in memory.
+   */
+  getSession(sessionId: string): WorkerSession | undefined;
 
   /**
    * Stop a session cleanly. After this, the session cannot receive messages.

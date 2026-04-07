@@ -3,7 +3,7 @@
  */
 
 export type WorkerRole = "foreman" | "planner" | "implementer" | "reviewer";
-export type WorkerProvider = "codex" | "claude" | "copilot" | "mock";
+export type WorkerProvider = "codex" | "claude" | "copilot";
 export type WorkerStatus = "starting" | "active" | "idle" | "stopped" | "failed";
 
 export interface WorkerConfig {
