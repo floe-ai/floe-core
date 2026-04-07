@@ -4,12 +4,22 @@
   "title": "Floe Configuration",
   "description": "Provider configuration for floe worker sessions. Lives at .floe/config.json. Committed to git (no secrets — API keys stay in environment variables).",
   "type": "object",
-  "required": ["defaultProvider"],
+  "required": ["defaultProvider", "enabledProviders"],
   "properties": {
     "defaultProvider": {
       "type": "string",
       "enum": ["codex", "claude", "copilot"],
       "description": "Default provider for all worker sessions unless overridden per role"
+    },
+    "enabledProviders": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["codex", "claude", "copilot"]
+      },
+      "minItems": 1,
+      "uniqueItems": true,
+      "description": "Providers enabled for this repo. New repos must set this explicitly. If absent on an existing config, pre-flight will flag it as unconfigured."
     },
     "configured": {
       "type": "boolean",
