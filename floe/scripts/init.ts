@@ -65,6 +65,26 @@ if (!existsSync(floeGitignore)) {
   created.push(".floe/.gitignore");
 }
 
+// ── Scaffold default DoD if not present ───────────────────────────────
+
+const dodDest = join(p.floe, "dod.json");
+if (!existsSync(dodDest)) {
+  const dodDefault = {
+    version: 1,
+    criteria: [
+      { id: "tests-pass", category: "quality", description: "All existing tests pass. No test regressions introduced.", severity: "required" },
+      { id: "acceptance-met", category: "correctness", description: "All acceptance criteria from the feature artefact are satisfied.", severity: "required" },
+      { id: "no-regressions", category: "quality", description: "No regressions in the area touched by the change.", severity: "required" },
+      { id: "code-reviewed", category: "quality", description: "Code has been reviewed by the Reviewer role and all critical/major findings resolved.", severity: "required" },
+      { id: "docs-updated", category: "documentation", description: "Documentation updated if the change affects public APIs, configuration, or user-facing behaviour.", severity: "recommended" },
+      { id: "no-security-issues", category: "security", description: "No known security vulnerabilities introduced. Secrets not committed.", severity: "required" },
+    ],
+    notes: "This is the project-level Definition of Done. Edit .floe/dod.json to customise criteria for your project.",
+  };
+  writeJson(dodDest, dodDefault);
+  created.push(".floe/dod.json");
+}
+
 // ── Initialise runtime state ──────────────────────────────────────────
 
 const stateFile = join(p.state, "current.json");
