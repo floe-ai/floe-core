@@ -14,8 +14,13 @@
  *   replace-worker       Stop and re-launch a worker
  *   stop-worker          Stop a worker session
  *   list-active-workers  List all active sessions
- *   manage-feature-pair  Launch implementer + reviewer pair
+ *   manage-feature-pair  Launch implementer + reviewer pair (starts autonomous feature runner)
  *   check-alignment      Check approach alignment status for a feature
+ *   feature-run-status   Get status of an autonomous feature run
+ *   show-dod             Show the project Definition of Done
+ *   edit-dod             Open the DoD file in $EDITOR
+ *   list-escalations     List escalation records (optional --status)
+ *   resolve-escalation   Resolve an escalation (--escalation <id> --resolution '<text>')
  *   configure            Set up provider defaults (interactive or flags)
  *   show-config          Show current provider configuration
  *   list-models          List available models for a provider
@@ -39,6 +44,7 @@ import { createInterface } from "node:readline";
 import * as p from "@clack/prompts";
 import { SessionRegistry } from "../runtime/registry.ts";
 import { ResultStore } from "../runtime/results.ts";
+import { loadDod, formatDodForPrompt } from "../runtime/dod.ts";
 import type { ProviderAdapter } from "../runtime/adapters/interface.ts";
 import { readFileSync, existsSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -94,6 +100,7 @@ function findProjectRoot(): string {
 
 interface FloeConfig {
   defaultProvider: string;
+  enabledProviders?: string[];
   configured?: boolean;
   roles?: {
     planner?: { provider?: string; model?: string; thinking?: string };
@@ -116,33 +123,49 @@ function resolveProvider(role: string, args: Record<string, any>, config: FloeCo
   provider: string;
   model?: string;
   thinking?: string;
+  error?: string;
 } {
   // 1. CLI flag
-  if (args.provider) return { provider: args.provider };
+  if (args.provider) return validateEnabledProvider({ provider: args.provider }, config);
 
   // 2. Environment variable
-  if (process.env.FLOE_PROVIDER) return { provider: process.env.FLOE_PROVIDER };
+  if (process.env.FLOE_PROVIDER) return validateEnabledProvider({ provider: process.env.FLOE_PROVIDER }, config);
 
   // 3. Config role-specific
   if (config?.roles) {
     const roleConfig = (config.roles as any)[role];
     if (roleConfig?.provider) {
-      return { provider: roleConfig.provider, model: roleConfig.model, thinking: roleConfig.thinking };
+      return validateEnabledProvider({ provider: roleConfig.provider, model: roleConfig.model, thinking: roleConfig.thinking }, config);
     }
   }
 
   // 4. Config default
   if (config?.defaultProvider) {
     const roleConfig = config.roles ? (config.roles as any)[role] : undefined;
-    return {
+    return validateEnabledProvider({
       provider: config.defaultProvider,
       model: roleConfig?.model,
       thinking: roleConfig?.thinking,
-    };
+    }, config);
   }
 
   // 5. No provider configured
   return { provider: "" };
+}
+
+function validateEnabledProvider(
+  resolved: { provider: string; model?: string; thinking?: string },
+  config: FloeConfig | null,
+): { provider: string; model?: string; thinking?: string; error?: string } {
+  if (config?.enabledProviders && resolved.provider) {
+    if (!config.enabledProviders.includes(resolved.provider)) {
+      return {
+        provider: "",
+        error: `Provider '${resolved.provider}' is not enabled for this repo. Enabled: [${config.enabledProviders.join(", ")}]. Update .floe/config.json or run: bun run .floe/bin/floe.ts configure`,
+      };
+    }
+  }
+  return resolved;
 }
 
 function getAdapter(provider: string): { adapter: ProviderAdapter | null; error: string | null } {
@@ -290,7 +313,14 @@ async function launchWorker(args: Record<string, any>) {
   if (!role) return { ok: false, error: "Missing required flag: --role" };
 
   const config = loadConfig(projectRoot);
+
+  // Pre-flight: enabledProviders must be set
+  if (!config?.enabledProviders) {
+    return { ok: false, error: "Provider allowlist not set. Run: bun run .floe/bin/floe.ts configure" };
+  }
+
   const resolved = resolveProvider(role, args, config);
+  if (resolved.error) return { ok: false, error: resolved.error };
   const { adapter, error } = getAdapter(resolved.provider);
   if (!adapter) return { ok: false, error };
 
@@ -299,13 +329,13 @@ async function launchWorker(args: Record<string, any>) {
     const scope = args.scope;
     const target = args.target;
     if (!scope || !target) {
-      return { ok: false, error: "launch-worker --role planner requires --scope <release|epic> and --target <id>" };
+      return { ok: false, error: "launch-worker --role planner requires --scope <intake|release|epic> and --target <id>" };
     }
-    if (scope !== "release" && scope !== "epic") {
-      return { ok: false, error: `Invalid --scope: ${scope}. Must be 'release' or 'epic'.` };
+    if (scope !== "intake" && scope !== "release" && scope !== "epic") {
+      return { ok: false, error: `Invalid --scope: ${scope}. Must be 'intake', 'release', or 'epic'.` };
     }
-    if (!artefactExists(scope, target, projectRoot)) {
-      return { ok: false, error: `${scope} artefact not found: ${target}` };
+    if (!artefactExists(scope === "intake" ? "release" : scope, target, projectRoot)) {
+      return { ok: false, error: `${scope === "intake" ? "release" : scope} artefact not found: ${target}` };
     }
   }
 
@@ -321,6 +351,16 @@ async function launchWorker(args: Record<string, any>) {
 
   const { content: roleContent, path: roleContentPath } = readRoleContent(role, projectRoot);
 
+  // Inject Definition of Done for reviewer and implementer roles
+  let contextWithDod = args.context as string | undefined;
+  if (role === "reviewer" || role === "implementer") {
+    const dod = loadDod(projectRoot);
+    if (dod) {
+      const dodText = formatDodForPrompt(dod);
+      contextWithDod = contextWithDod ? `${contextWithDod}\n\n${dodText}` : dodText;
+    }
+  }
+
   // Async dispatch: fork a background subprocess and return immediately
   if (args.async && args.message) {
     return dispatchAsync({ ...args, _launch: true, provider: resolved.provider, model: resolved.model, thinking: resolved.thinking });
@@ -334,7 +374,7 @@ async function launchWorker(args: Record<string, any>) {
     releaseId: args.release,
     roleContent,
     roleContentPath,
-    contextAddendum: args.context,
+    contextAddendum: contextWithDod,
     model: resolved.model,
     thinking: resolved.thinking,
   });
@@ -540,6 +580,11 @@ async function manageFeaturePair(args: Record<string, any>) {
 
   const config = loadConfig(projectRoot);
 
+  // Pre-flight: enabledProviders must be set
+  if (!config?.enabledProviders) {
+    return { ok: false, error: "Provider allowlist not set. Run: bun run .floe/bin/floe.ts configure" };
+  }
+
   // Resolve providers for implementer and reviewer independently
   const implResolved = args["implementer-provider"]
     ? { provider: args["implementer-provider"] }
@@ -548,14 +593,30 @@ async function manageFeaturePair(args: Record<string, any>) {
     ? { provider: args["reviewer-provider"] }
     : resolveProvider("reviewer", args, config);
 
+  if (implResolved.error) return { ok: false, error: implResolved.error };
+  if (revResolved.error) return { ok: false, error: revResolved.error };
+
   const [implementer, reviewer] = await Promise.all([
     launchWorker({ role: "implementer", provider: implResolved.provider, feature: args.feature, epic: args.epic, release: args.release }),
     launchWorker({ role: "reviewer", provider: revResolved.provider, feature: args.feature, epic: args.epic, release: args.release }),
   ]);
 
+  // Spawn feature runner in background
+  const featureRunnerPath = join(dirname(import.meta.dir), "scripts", "feature-runner.ts");
+  const child = Bun.spawn(["bun", "run", featureRunnerPath, "run",
+    "--feature", args.feature,
+    "--impl-session", (implementer as any).sessionId,
+    "--rev-session", (reviewer as any).sessionId,
+  ], {
+    cwd: projectRoot,
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  child.unref();
+
   return {
     ok: true,
     featureId: args.feature,
+    featureRunnerStarted: true,
     implementer: { sessionId: (implementer as any).sessionId, provider: implResolved.provider },
     reviewer: { sessionId: (reviewer as any).sessionId, provider: revResolved.provider },
   };
@@ -565,6 +626,7 @@ async function checkAlignment(args: Record<string, any>) {
   if (!args.feature) return { ok: false, error: "check-alignment requires --feature <id>" };
 
   const alignment = getAlignmentStatus(args.feature, projectRoot);
+  const dod = loadDod(projectRoot);
   return {
     ok: true,
     featureId: args.feature,
@@ -572,7 +634,60 @@ async function checkAlignment(args: Record<string, any>) {
     approachStatus: alignment.approachStatus,
     reviewId: alignment.reviewId,
     approved: alignment.approachStatus === "approved",
+    dod: dod ? { version: dod.version, criteriaCount: dod.criteria.length, criteria: dod.criteria } : null,
   };
+}
+
+// ─── DoD commands ────────────────────────────────────────────────────
+
+async function showDod(_args: Record<string, any>) {
+  const dod = loadDod(projectRoot);
+  if (!dod) return { ok: false, error: "No .floe/dod.json found. Create one or run: bun run .floe/scripts/init.ts" };
+  return { ok: true, version: dod.version, criteria: dod.criteria, notes: dod.notes, formatted: formatDodForPrompt(dod) };
+}
+
+async function editDod(_args: Record<string, any>) {
+  const dodPath = join(projectRoot, ".floe", "dod.json");
+  if (!existsSync(dodPath)) return { ok: false, error: "No .floe/dod.json found. Create one or run: bun run .floe/scripts/init.ts" };
+  const editor = process.env.EDITOR || "vi";
+  const { spawnSync } = await import("node:child_process");
+  spawnSync(editor, [dodPath], { stdio: "inherit" });
+  const dod = loadDod(projectRoot);
+  if (!dod) return { ok: false, error: "dod.json is invalid after editing" };
+  return { ok: true, message: `DoD updated (${dod.criteria.length} criteria)` };
+}
+
+// ─── Feature runner status ───────────────────────────────────────────
+
+async function featureRunStatus(args: Record<string, any>) {
+  if (!args.feature) return { ok: false, error: "feature-run-status requires --feature <id>" };
+  const statePath = join(projectRoot, ".floe", "state", "feature-runs", `${args.feature}.json`);
+  if (!existsSync(statePath)) return { ok: false, error: `No feature run found for: ${args.feature}` };
+  try {
+    return { ok: true, ...JSON.parse(readFileSync(statePath, "utf-8")) };
+  } catch (e: any) {
+    return { ok: false, error: `Failed to read feature run state: ${e.message}` };
+  }
+}
+
+// ─── Escalation commands ─────────────────────────────────────────────
+
+async function listEscalations(args: Record<string, any>) {
+  const proc = Bun.spawnSync(
+    ["bun", "run", join(dirname(import.meta.dir), "scripts", "escalation.ts"), "list", ...(args.status ? ["--status", args.status] : [])],
+    { cwd: projectRoot, stdout: "pipe", stderr: "pipe" },
+  );
+  try { return JSON.parse(proc.stdout.toString()); } catch { return { ok: false, error: proc.stderr.toString() || "Failed to list escalations" }; }
+}
+
+async function resolveEscalation(args: Record<string, any>) {
+  if (!args.escalation) return { ok: false, error: "resolve-escalation requires --escalation <id>" };
+  if (!args.resolution) return { ok: false, error: "resolve-escalation requires --resolution '<text>'" };
+  const proc = Bun.spawnSync(
+    ["bun", "run", join(dirname(import.meta.dir), "scripts", "escalation.ts"), "resolve", args.escalation, args.resolution],
+    { cwd: projectRoot, stdout: "pipe", stderr: "pipe" },
+  );
+  try { return JSON.parse(proc.stdout.toString()); } catch { return { ok: false, error: proc.stderr.toString() || "Failed to resolve escalation" }; }
 }
 
 // ─── Configure command ───────────────────────────────────────────────
@@ -709,7 +824,18 @@ async function configureCommand(args: Record<string, any>) {
     if (!defaultProvider) return { ok: false, error: "configure --non-interactive requires --default-provider <claude|codex|copilot>" };
     if (!PROVIDERS.includes(defaultProvider as any)) return { ok: false, error: `Invalid provider: ${defaultProvider}. Must be: ${PROVIDERS.join(", ")}` };
 
-    const config: FloeConfig = { defaultProvider, configured: true };
+    const rawEnabled = args["enabled-providers"] as string | undefined;
+    const enabledProviders = rawEnabled
+      ? rawEnabled.split(",").map((s: string) => s.trim()).filter(Boolean)
+      : [defaultProvider];
+    for (const ep of enabledProviders) {
+      if (!PROVIDERS.includes(ep as any)) return { ok: false, error: `Invalid enabled provider: ${ep}. Must be: ${PROVIDERS.join(", ")}` };
+    }
+    if (!enabledProviders.includes(defaultProvider)) {
+      return { ok: false, error: `Default provider '${defaultProvider}' must be in enabledProviders [${enabledProviders.join(", ")}]` };
+    }
+
+    const config: FloeConfig = { defaultProvider, enabledProviders, configured: true };
     if (args.model || args.thinking) {
       config.roles = {};
       for (const role of ["planner", "implementer", "reviewer"] as const) {
@@ -733,11 +859,29 @@ async function configureCommand(args: Record<string, any>) {
   const hasOpenAI = !!process.env.OPENAI_API_KEY;
   const detectedDefault = hasAnthropic ? "claude" : hasOpenAI ? "codex" : "copilot";
 
-  // 1. Default provider
+  // 0. Enabled providers — which providers can this repo use?
+  const enabledProviders = await p.multiselect({
+    message: "Which providers do you want to enable for this repo?",
+    options: PROVIDERS.map(prov => ({
+      value: prov,
+      label: prov.charAt(0).toUpperCase() + prov.slice(1),
+      hint: PROVIDER_HINTS[prov],
+    })),
+    initialValues: [detectedDefault],
+    required: true,
+  });
+  handleCancel(enabledProviders);
+
+  if ((enabledProviders as string[]).length === 0) {
+    p.log.error("You must enable at least one provider.");
+    process.exit(1);
+  }
+
+  // 1. Default provider (from enabled set only)
   const defaultProvider = await p.select({
     message: "Which provider should workers use by default?",
-    initialValue: detectedDefault,
-    options: PROVIDERS.map(prov => ({
+    initialValue: (enabledProviders as string[]).includes(detectedDefault) ? detectedDefault : (enabledProviders as string[])[0],
+    options: (enabledProviders as string[]).map(prov => ({
       value: prov,
       label: prov.charAt(0).toUpperCase() + prov.slice(1),
       hint: PROVIDER_HINTS[prov],
@@ -808,7 +952,7 @@ async function configureCommand(args: Record<string, any>) {
   handleCancel(globalThinking);
 
   // 5. Per-role customization
-  const config: FloeConfig = { defaultProvider: defaultProvider as string, configured: true, roles: {} };
+  const config: FloeConfig = { defaultProvider: defaultProvider as string, enabledProviders: enabledProviders as string[], configured: true, roles: {} };
 
   const customize = await p.confirm({
     message: "Customize per role? (planner, implementer, reviewer)",
@@ -825,7 +969,7 @@ async function configureCommand(args: Record<string, any>) {
       const roleProvider = await p.select({
         message: `Provider for ${role}?`,
         initialValue: defaultProvider as string,
-        options: PROVIDERS.map(prov => ({
+        options: (enabledProviders as string[]).map(prov => ({
           value: prov,
           label: prov.charAt(0).toUpperCase() + prov.slice(1),
           hint: prov === (defaultProvider as string) ? "current default" : PROVIDER_HINTS[prov],
@@ -931,7 +1075,11 @@ async function showConfig(_args: Record<string, any>) {
   if (!config) {
     return { ok: false, error: "No .floe/config.json found. Run: bun run .floe/bin/floe.ts configure" };
   }
-  return { ok: true, config };
+  return {
+    ok: true,
+    config,
+    enabledProviders: config.enabledProviders ?? "NOT SET (run configure)",
+  };
 }
 
 async function listModels(args: Record<string, any>) {
@@ -1030,6 +1178,10 @@ const { values: opts } = parseArgs({
     async: { type: "boolean" },
     "result-path": { type: "string" },
     timeout: { type: "string" },
+    "enabled-providers": { type: "string" },
+    escalation: { type: "string" },
+    resolution: { type: "string" },
+    status: { type: "string" },
   },
   strict: false,
 });
@@ -1049,6 +1201,11 @@ async function main() {
     "wait-worker": waitWorker,
     "manage-feature-pair": manageFeaturePair,
     "check-alignment": checkAlignment,
+    "feature-run-status": featureRunStatus,
+    "show-dod": showDod,
+    "edit-dod": editDod,
+    "list-escalations": listEscalations,
+    "resolve-escalation": resolveEscalation,
     "configure": configureCommand,
     "show-config": showConfig,
     "list-models": listModels,

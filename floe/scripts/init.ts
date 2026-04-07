@@ -26,7 +26,7 @@ const p = paths(values["project-root"] as string | undefined);
 // ── Scaffold directories ──────────────────────────────────────────────
 
 const dirs = [
-  p.releases, p.epics, p.features, p.reviews, p.summaries, p.notes,
+  p.releases, p.epics, p.features, p.reviews, p.summaries, p.notes, p.escalations,
   p.prd, p.architecture, p.decisions,
   p.state,
 ];

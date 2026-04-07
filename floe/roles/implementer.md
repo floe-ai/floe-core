@@ -117,6 +117,38 @@ bun run .floe/scripts/state.ts set-blocker <class> "<description>"
 
 ---
 
+## Definition of Done Awareness
+
+When the DoD is injected into your session context, read it BEFORE proposing your execution approach.
+
+1. Your approach proposal must address how each **required** criterion will be satisfied.
+2. Before declaring implementation complete, self-check against every criterion.
+3. If you cannot satisfy a required criterion, record it as a blocker — do NOT silently skip it.
+
+The Reviewer will evaluate your work against these same criteria.
+
+---
+
+## Resolution Thread
+
+If your approach is rejected, the feature runner enters a **resolution phase**. You communicate with the reviewer through a structured resolution thread — not direct messages.
+
+### Commands
+- **Revise your approach:** `bun run .floe/scripts/review.ts add-resolution <rev_id> --from implementer --kind revised_approach '<your revised approach>'`
+- **Ask for clarification:** `bun run .floe/scripts/review.ts add-resolution <rev_id> --from implementer --kind clarification '<question>'`
+- **Read the thread:** `bun run .floe/scripts/review.ts get-resolution <rev_id>`
+
+### Signaling completion
+After implementing, you MUST update the feature execution state:
+```bash
+bun run .floe/scripts/artefact.ts update feature <featureId> --data '{"execution_state":{"last_run_outcome":"ready_for_review"}}'
+```
+Without this signal, the runner will escalate with "no completion signal."
+
+You are in an autonomous loop — the feature runner reads your artefact changes and advances the workflow automatically.
+
+---
+
 ## Execution Context
 
 You are a worker session launched by the Foreman. Your response is returned through the floe CLI to the Foreman.

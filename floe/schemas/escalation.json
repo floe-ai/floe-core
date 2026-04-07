@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://floe.ai/schemas/escalation.json",
+  "title": "Escalation",
+  "description": "A structured escalation record. Created when the feature runner or a worker encounters a condition that cannot be resolved autonomously.",
+  "type": "object",
+  "required": ["id", "source_role", "feature_id", "reason_class", "description", "status", "created_at"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^esc-[a-z0-9-]+$"
+    },
+    "source_role": {
+      "type": "string",
+      "enum": ["implementer", "reviewer", "planner", "feature-runner"],
+      "description": "Which role or system component created this escalation"
+    },
+    "source_session_id": {
+      "type": "string",
+      "description": "Optional session ID of the worker that triggered the escalation"
+    },
+    "feature_id": {
+      "type": "string",
+      "description": "Feature this escalation relates to"
+    },
+    "review_id": {
+      "type": "string",
+      "description": "Optional review ID if the escalation originated from a review"
+    },
+    "reason_class": {
+      "type": "string",
+      "enum": [
+        "approach_deadlock",
+        "repeated_failure",
+        "scope_change",
+        "architecture_decision",
+        "missing_context",
+        "external_dependency"
+      ],
+      "description": "Classification of why escalation is needed"
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable description of what happened and why escalation is needed"
+    },
+    "context": {
+      "type": "string",
+      "description": "Optional additional context — what the worker was doing when escalation was triggered"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["open", "surfaced", "resolved", "dismissed"],
+      "default": "open"
+    },
+    "resolution": {
+      "type": "string",
+      "description": "How the escalation was resolved (set when status changes to resolved)"
+    },
+    "dismissed_reason": {
+      "type": "string",
+      "description": "Why the escalation was dismissed (set when status changes to dismissed)"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "resolved_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "additionalProperties": false
+}

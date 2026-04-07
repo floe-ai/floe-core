@@ -64,6 +64,23 @@ function saveState(state: FeatureRunState): void {
 
 // ── Worker messaging ─────────────────────────────────────────────────
 
+function createEscalation(state: FeatureRunState, reasonClass: string, description: string, reviewId?: string): void {
+  const escScript = join(import.meta.dir, "escalation.ts");
+  const args = [
+    "run", escScript, "create",
+    "--from", "feature-runner",
+    "--feature", state.featureId,
+    "--reason", reasonClass,
+  ];
+  if (reviewId) args.push("--review", reviewId);
+  args.push(description);
+  Bun.spawnSync(["bun", ...args], {
+    cwd: p.root,
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+}
+
 function messageWorker(
   sessionId: string,
   message: string,
@@ -186,6 +203,7 @@ function tickAlignment(state: FeatureRunState): void {
       state.escalationReason = review.approach_proposal.verdict_rationale ?? "approach escalated by reviewer";
       state.lastAction = "read-verdict";
       state.lastActionResult = "approach escalated by reviewer";
+      createEscalation(state, "approach_deadlock", state.escalationReason, review.id);
     }
     saveState(state);
     return;
@@ -272,12 +290,14 @@ function tickResolution(state: FeatureRunState): void {
         state.outcome = "escalated";
         state.escalationReason = "approach_deadlock: max resolution rounds exhausted";
         state.lastActionResult = "max resolution rounds exhausted — escalating";
+        createEscalation(state, "approach_deadlock", state.escalationReason, review.id);
       }
     } else if (verdict === "escalated") {
       state.phase = "escalated";
       state.outcome = "escalated";
       state.escalationReason = review.approach_proposal.verdict_rationale ?? "escalated during resolution";
       state.lastActionResult = "escalated by reviewer during resolution";
+      createEscalation(state, "approach_deadlock", state.escalationReason, review.id);
     }
     saveState(state);
     return;
@@ -325,6 +345,7 @@ function tickImplementation(state: FeatureRunState): void {
         ? `implementation_failure: ${execState.last_failure_class}`
         : "implementation_failure: implementer reported failure";
       state.lastActionResult = "implementer reported failure — escalating";
+      createEscalation(state, "repeated_failure", state.escalationReason);
       saveState(state);
       return;
     }
@@ -336,6 +357,7 @@ function tickImplementation(state: FeatureRunState): void {
       state.outcome = "escalated";
       state.escalationReason = "no completion signal from implementer";
       state.lastActionResult = "no completion signal after status check — escalating";
+      createEscalation(state, "missing_context", state.escalationReason);
       saveState(state);
       return;
     }
@@ -426,6 +448,7 @@ function tickReview(state: FeatureRunState): void {
         state.outcome = "escalated";
         state.escalationReason = "repeated_failure";
         state.lastActionResult = "max review rounds exhausted — escalating";
+        createEscalation(state, "repeated_failure", "Max review rounds exhausted for feature " + state.featureId, review.id);
       }
       saveState(state);
       return;
@@ -436,6 +459,7 @@ function tickReview(state: FeatureRunState): void {
       state.outcome = "blocked";
       state.escalationReason = "blocked";
       state.lastActionResult = "reviewer marked feature as blocked — escalating";
+      createEscalation(state, "external_dependency", "Reviewer marked feature as blocked: " + state.featureId, review.id);
       saveState(state);
       return;
     }
@@ -445,6 +469,7 @@ function tickReview(state: FeatureRunState): void {
       state.outcome = "needs_replan";
       state.escalationReason = "needs_replan";
       state.lastActionResult = "reviewer says feature needs replanning — escalating";
+      createEscalation(state, "scope_change", "Feature needs replanning: " + state.featureId, review.id);
       saveState(state);
       return;
     }

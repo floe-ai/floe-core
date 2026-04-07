@@ -258,6 +258,23 @@ switch (cmd) {
       review.approach_proposal.verdict = "escalated";
       review.approach_proposal.verdict_rationale = "Auto-escalated: resolution thread exceeded maximum rounds";
       review.approach_proposal.verdict_at = timestamp();
+
+      // Create an escalation artefact
+      const escScript = join(import.meta.dir, "escalation.ts");
+      const featureId = review.target_id ?? "unknown";
+      Bun.spawnSync({
+        cmd: [
+          "bun", "run", escScript,
+          "create",
+          "--from", "feature-runner",
+          "--feature", featureId,
+          "--reason", "approach_deadlock",
+          "--review", review.id,
+          `Resolution thread exceeded 6 entries on review ${review.id}`,
+        ],
+        stdout: "ignore",
+        stderr: "ignore",
+      });
     }
 
     review.updated_at = timestamp();

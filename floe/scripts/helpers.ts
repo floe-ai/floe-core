@@ -35,6 +35,7 @@ export function paths(root?: string) {
     reviews: join(projectRoot, "delivery", "reviews"),
     summaries: join(projectRoot, "delivery", "summaries"),
     notes: join(projectRoot, "delivery", "notes"),
+    escalations: join(projectRoot, "delivery", "escalations"),
     docs: join(projectRoot, "docs"),
     prd: join(projectRoot, "docs", "prd"),
     architecture: join(projectRoot, "docs", "architecture"),

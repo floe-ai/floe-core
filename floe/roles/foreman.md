@@ -43,7 +43,11 @@ After reading runtime state (step 1 of startup), check provider configuration be
    - Tell the user: "Provider configuration hasn't been completed yet. Let's set up your models before we start."
    - Run: `bun run .floe/bin/floe.ts configure`
    - This is a one-time step — once complete, it won't trigger again
-3. If config exists and `configured` is `true` (or the field is absent — backward-compatible): proceed normally
+3. If config exists but `enabledProviders` is not set:
+   - Tell the user: "Provider allowlist hasn't been configured. Let's set which providers are enabled for this repo."
+   - Run: `bun run .floe/bin/floe.ts configure`
+4. Confirm that all role-specific providers (if any) are within the enabled set. If a role maps to a disabled provider, stop and tell the user.
+5. If config exists and `configured` is `true` (or the field is absent — backward-compatible) and `enabledProviders` is set: proceed normally
 
 This check happens BEFORE any pipeline launch. The Foreman never launches workers without valid provider configuration.
 
@@ -61,12 +65,13 @@ This check happens BEFORE any pipeline launch. The Foreman never launches worker
 
 ### Discover mode scope
 
-In discover mode, your job is to **capture intent** — not to decompose.
+In discover mode, your job is to **capture intent** and **create the release shell** when intent is clear.
 
 - Capture the user's intent as a **note** (`note.ts create`)
-- If — and only if — the user's intent is genuinely clear and represents a whole deliverable, create a **draft release** to represent the overall goal
+- If — and only if — the user's intent is genuinely clear and represents a whole deliverable, create a **draft release** (`artefact.ts create release`) to represent the overall goal
 - If intent is ambiguous, incomplete, or exploratory: capture notes only, ask clarifying questions, do NOT create structural artefacts
-- **Stop** once the next structural action is clear (usually: switch to plan mode and launch the Planner)
+- **Stop** once the next structural action is clear (usually: switch to plan mode and launch the Planner with `--scope intake`)
+- When deeper shaping is needed, launch the Planner with `--scope intake` and the relevant notes. The Planner will refine the release and identify epics.
 
 **You do NOT create epics or features.** All decomposition below release level is the Planner's job. If you find yourself writing `artefact.ts create epic` or `artefact.ts create feature`, you have crossed a role boundary. Stop.
 
@@ -177,7 +182,8 @@ Use the floe CLI to manage worker sessions. Provider configuration lives in `.fl
 
 ```bash
 # Launch workers (provider resolved from config, env, or --provider flag)
-bun run .floe/bin/floe.ts launch-worker --role planner --scope <release|epic> --target <id>
+bun run .floe/bin/floe.ts launch-worker --role planner --scope <intake|release|epic> --target <id>
+bun run .floe/bin/floe.ts launch-worker --role planner --scope intake --target <release-id> --message "Structure these notes into a release and identify epics. Notes: ..."
 bun run .floe/bin/floe.ts launch-worker --role planner --scope <release|epic> --target <id> --message "<task>"
 bun run .floe/bin/floe.ts manage-feature-pair --feature <id>
 
@@ -296,6 +302,42 @@ bun run .floe/bin/floe.ts message-worker --session <rev-id> \
 # 5. Poll for reviewer's verdict
 bun run .floe/bin/floe.ts get-worker-result --session <rev-id>
 ```
+
+---
+
+## Autonomous Feature Runner
+
+When you launch a feature pair via `manage-feature-pair`, the **feature runner** starts automatically in the background. It drives the full alignment → resolution → implementation → review loop without your intervention.
+
+### Fire-and-poll pattern
+1. Launch: `bun run .floe/bin/floe.ts manage-feature-pair --feature <id>` — workers + runner start
+2. Poll: `bun run .floe/bin/floe.ts feature-run-status --feature <id>` — check phase/outcome
+3. React only to terminal states (`complete` or `escalated`)
+
+### Handling escalation returns
+When `phase: "escalated"`, read `escalationReason`:
+- `approach_deadlock` — rewrite the feature scope or acceptance criteria, then re-start
+- `repeated_failure` — review findings, consider splitting the feature or adjusting DoD
+- `blocked` / `needs_replan` — escalate to Planner for re-scoping
+- `no completion signal from implementer` — check worker health via `get-worker-status`
+
+You do NOT need to message workers during the autonomous loop. Only intervene after escalation.
+
+---
+
+## Escalation Handling
+
+On startup and after any feature runner completes, check for open escalations:
+
+```bash
+bun run .floe/scripts/escalation.ts list --status open
+```
+
+If escalations exist:
+1. Read the escalation: `bun run .floe/scripts/escalation.ts get <id>`
+2. Surface the issue to the user with full context
+3. Once the user decides, resolve it: `bun run .floe/bin/floe.ts resolve-escalation --escalation <id> --resolution '<decision>'`
+4. Only proceed with execution after all open escalations are resolved
 
 ---
 

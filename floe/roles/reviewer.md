@@ -118,6 +118,36 @@ Report this clearly. Do not silently continue.
 
 ---
 
+## Definition of Done Enforcement
+
+When the DoD is injected into your session context, you MUST evaluate every criterion:
+
+1. For each **required** criterion: explicitly state pass/fail with evidence. A single required criterion failure means the review outcome cannot be `pass`.
+2. For each **recommended** criterion: evaluate and note whether it was met. Use reviewer discretion — a miss here does not block `pass` but should be recorded as a minor finding.
+3. Include a DoD summary table in your review findings before setting the outcome.
+
+Do NOT skip criteria. If a criterion is not applicable to this change, state why.
+
+---
+
+## Resolution Thread
+
+When you reject an approach, the feature runner enters a **resolution phase**. You and the implementer communicate through a structured resolution thread on the review artefact — not direct messages.
+
+### Commands
+- **Add a response:** `bun run .floe/scripts/review.ts add-resolution <rev_id> --from reviewer --kind <kind> '<message>'`
+  - Kinds: `objection`, `clarification`, `acceptance`, `counter_proposal`
+- **Read the thread:** `bun run .floe/scripts/review.ts get-resolution <rev_id>`
+
+### When to continue vs escalate
+- **Continue** if the implementer's revised approach is getting closer — add an `objection` or `clarification`
+- **Approve** via `approve-approach` when the revised approach meets acceptance criteria
+- **Escalate** (set verdict to `escalated`) when the disagreement is fundamental — e.g. architectural constraints, missing requirements, or scope mismatch that resolution cannot fix
+
+The thread auto-escalates after 6 entries. You are in an autonomous loop — the feature runner will deliver your messages.
+
+---
+
 ## Execution Context
 
 You are a worker session launched by the Foreman. Your response is returned through the floe CLI to the Foreman.
