@@ -131,11 +131,17 @@ export class CodexAdapter implements ProviderAdapter {
     const client = await this.getClient();
 
     // ThreadOptions has no systemPrompt; role content is injected in the first message.
-    const thread = client.startThread({
+    const threadOpts: CodexThreadOptions = {
       workingDirectory: process.cwd(),
       skipGitRepoCheck: true,
       approvalPolicy: "on-request",
-    });
+    };
+    if (config.model) threadOpts.model = config.model;
+    if (config.thinking) {
+      const effortMap: Record<string, string> = { low: "low", normal: "medium", high: "high" };
+      threadOpts.modelReasoningEffort = effortMap[config.thinking] ?? "medium";
+    }
+    const thread = client.startThread(threadOpts);
 
     const id = this.generateId();
     const now = this.now();
@@ -152,7 +158,7 @@ export class CodexAdapter implements ProviderAdapter {
       roleContentPath: config.roleContentPath,
       createdAt: now,
       updatedAt: now,
-      metadata: {},
+      metadata: { model: config.model, thinking: config.thinking },
     };
 
     this.sessions.set(id, {
@@ -189,11 +195,19 @@ export class CodexAdapter implements ProviderAdapter {
     }
 
     const client = await this.getClient();
-    const thread = client.resumeThread(codexThreadId, {
+    const storedModel = storedSession.metadata?.model as string | undefined;
+    const storedThinking = storedSession.metadata?.thinking as string | undefined;
+    const resumeOpts: CodexThreadOptions = {
       workingDirectory: process.cwd(),
       skipGitRepoCheck: true,
       approvalPolicy: "on-request",
-    });
+    };
+    if (storedModel) resumeOpts.model = storedModel;
+    if (storedThinking) {
+      const effortMap: Record<string, string> = { low: "low", normal: "medium", high: "high" };
+      resumeOpts.modelReasoningEffort = effortMap[storedThinking] ?? "medium";
+    }
+    const thread = client.resumeThread(codexThreadId, resumeOpts);
 
     const now = this.now();
     const resumedSession: WorkerSession = {

@@ -33,6 +33,8 @@ interface ClaudeSessionMeta {
   claudeSessionId: string;
   session: WorkerSession;
   systemPrompt?: string;
+  model?: string;
+  thinking?: string;
 }
 
 export class ClaudeAdapter implements ProviderAdapter {
@@ -106,6 +108,8 @@ export class ClaudeAdapter implements ProviderAdapter {
       claudeSessionId,
       session,
       systemPrompt: this.buildSystemPrompt(config),
+      model: config.model,
+      thinking: config.thinking,
     });
     return session;
   }
@@ -147,12 +151,17 @@ export class ClaudeAdapter implements ProviderAdapter {
 
   /** Build query options for the Claude Agent SDK query() call. */
   private buildQueryOptions(meta: ClaudeSessionMeta): Record<string, unknown> {
-    return {
+    const opts: Record<string, unknown> = {
       resume: meta.claudeSessionId,
       sessionId: meta.claudeSessionId,
       persistSession: true,
       ...(meta.systemPrompt ? { systemPrompt: meta.systemPrompt } : {}),
     };
+    if (meta.model) opts.model = meta.model;
+    if (meta.thinking === "high") {
+      opts.thinking = { type: "enabled", budget_tokens: 10000 };
+    }
+    return opts;
   }
 
   /** Extract text content from a Claude SDK event. */

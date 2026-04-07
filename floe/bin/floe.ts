@@ -435,8 +435,107 @@ const PROVIDER_HINTS: Record<string, string> = {
   copilot: "uses GitHub CLI credentials",
 };
 
+interface ModelChoice { id: string; label: string }
+
+const CURATED_MODELS: Record<string, ModelChoice[]> = {
+  claude: [
+    { id: "claude-sonnet-4-20250514", label: "Claude Sonnet 4" },
+    { id: "claude-opus-4-20250514", label: "Claude Opus 4" },
+    { id: "claude-haiku-4-20250514", label: "Claude Haiku 4" },
+  ],
+  codex: [
+    { id: "o3-mini", label: "o3-mini" },
+    { id: "o4-mini", label: "o4-mini" },
+    { id: "gpt-4.1", label: "GPT-4.1" },
+  ],
+  copilot: [],
+};
+
+const THINKING_LEVELS: ModelChoice[] = [
+  { id: "normal", label: "normal (default)" },
+  { id: "low", label: "low" },
+  { id: "high", label: "high (extended thinking)" },
+];
+
+const modelCache = new Map<string, ModelChoice[]>();
+
+async function fetchClaudeModels(): Promise<ModelChoice[]> {
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) return CURATED_MODELS.claude;
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/models", {
+      headers: { "x-api-key": key, "anthropic-version": "2023-06-01" },
+    });
+    if (!res.ok) return CURATED_MODELS.claude;
+    const data = (await res.json()) as { data?: { id: string; display_name?: string }[] };
+    const models = (data.data ?? [])
+      .filter(m => m.id && !m.id.includes("embed"))
+      .map(m => ({ id: m.id, label: m.display_name ?? m.id }))
+      .sort((a, b) => a.id.localeCompare(b.id));
+    return models.length > 0 ? models : CURATED_MODELS.claude;
+  } catch {
+    return CURATED_MODELS.claude;
+  }
+}
+
+async function fetchOpenAIModels(): Promise<ModelChoice[]> {
+  const key = process.env.OPENAI_API_KEY;
+  if (!key) return CURATED_MODELS.codex;
+  try {
+    const res = await fetch("https://api.openai.com/v1/models", {
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    if (!res.ok) return CURATED_MODELS.codex;
+    const data = (await res.json()) as { data?: { id: string }[] };
+    const relevant = new Set(["o3-mini", "o4-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "gpt-4o", "gpt-4o-mini", "o3", "o4"]);
+    const models = (data.data ?? [])
+      .filter(m => m.id && relevant.has(m.id))
+      .map(m => ({ id: m.id, label: m.id }))
+      .sort((a, b) => a.id.localeCompare(b.id));
+    return models.length > 0 ? models : CURATED_MODELS.codex;
+  } catch {
+    return CURATED_MODELS.codex;
+  }
+}
+
+async function fetchModelsForProvider(provider: string): Promise<ModelChoice[]> {
+  if (modelCache.has(provider)) return modelCache.get(provider)!;
+  let models: ModelChoice[];
+  if (provider === "claude") models = await fetchClaudeModels();
+  else if (provider === "codex") models = await fetchOpenAIModels();
+  else models = [];
+  modelCache.set(provider, models);
+  return models;
+}
+
 function askLine(rl: ReturnType<typeof createInterface>, question: string): Promise<string> {
   return new Promise((resolve) => rl.question(question, resolve));
+}
+
+async function selectFromList(
+  rl: ReturnType<typeof createInterface>,
+  items: ModelChoice[],
+  prompt: string,
+  options?: { allowSkip?: boolean; defaultIndex?: number },
+): Promise<string | null> {
+  if (items.length === 0) return null;
+  console.error(prompt);
+  items.forEach((item, i) => {
+    const marker = options?.defaultIndex === i ? " (recommended)" : "";
+    console.error(`  ${i + 1}) ${item.label}${marker}`);
+  });
+  if (options?.allowSkip) {
+    console.error(`  ${items.length + 1}) Skip (use provider default)`);
+  }
+  const max = items.length + (options?.allowSkip ? 1 : 0);
+  while (true) {
+    const raw = (await askLine(rl, "> ")).trim();
+    if (!raw && options?.defaultIndex !== undefined) return items[options.defaultIndex].id;
+    const idx = parseInt(raw, 10) - 1;
+    if (options?.allowSkip && idx === items.length) return null;
+    if (idx >= 0 && idx < items.length) return items[idx].id;
+    console.error(`  Enter 1-${max}`);
+  }
 }
 
 async function configureCommand(args: Record<string, any>) {
@@ -449,6 +548,15 @@ async function configureCommand(args: Record<string, any>) {
     if (!PROVIDERS.includes(defaultProvider as any)) return { ok: false, error: `Invalid provider: ${defaultProvider}. Must be: ${PROVIDERS.join(", ")}` };
 
     const config: FloeConfig = { defaultProvider };
+    if (args.model || args.thinking) {
+      config.roles = {};
+      for (const role of ["planner", "implementer", "reviewer"] as const) {
+        const roleConf: Record<string, string> = {};
+        if (args.model) roleConf.model = args.model;
+        if (args.thinking) roleConf.thinking = args.thinking;
+        (config.roles as any)[role] = roleConf;
+      }
+    }
     mkdirSync(join(projectRoot, ".floe"), { recursive: true });
     writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
     return { ok: true, message: `Wrote ${configPath}`, config };
@@ -460,6 +568,8 @@ async function configureCommand(args: Record<string, any>) {
   try {
     console.error("\nfloe provider configuration");
     console.error("────────────────────────────\n");
+
+    // 1. Default provider
     console.error("Which provider should workers use by default?");
     PROVIDERS.forEach((p, i) => console.error(`  ${i + 1}) ${p}   (${PROVIDER_HINTS[p]})`));
 
@@ -477,21 +587,79 @@ async function configureCommand(args: Record<string, any>) {
     }
 
     const config: FloeConfig = { defaultProvider, roles: {} };
+    let globalModel: string | null = null;
+    let globalThinking: string | null = null;
 
-    console.error(`\nDefault provider: ${defaultProvider}`);
+    // 2. Default model (fetched from API or curated fallback)
+    const defaultModels = await (async () => {
+      console.error(`\nFetching available models for ${defaultProvider}...`);
+      return fetchModelsForProvider(defaultProvider);
+    })();
+
+    if (defaultModels.length > 0) {
+      globalModel = await selectFromList(rl, defaultModels, `\nDefault model for ${defaultProvider}:`, {
+        allowSkip: true,
+        defaultIndex: 0,
+      });
+    }
+
+    // 3. Default thinking level
+    globalThinking = await selectFromList(rl, THINKING_LEVELS, "\nDefault reasoning level:", {
+      defaultIndex: 0,
+    });
+
+    // 4. Per-role customization
+    console.error(`\nDefault: ${defaultProvider}${globalModel ? ` / ${globalModel}` : ""}${globalThinking && globalThinking !== "normal" ? ` / thinking=${globalThinking}` : ""}`);
     const customizeRaw = (await askLine(rl, "Customize per role? [y/N] ")).trim().toLowerCase();
     const customize = customizeRaw === "y" || customizeRaw === "yes";
 
     if (customize) {
       for (const role of ["planner", "implementer", "reviewer"] as const) {
-        const provRaw = (await askLine(rl, `${role} provider [${defaultProvider}]: `)).trim();
-        const prov = provRaw && PROVIDERS.includes(provRaw as any) ? provRaw : "";
-        const modelRaw = (await askLine(rl, `${role} model (optional, Enter to skip): `)).trim();
+        console.error(`\n── ${role} ──`);
+        const roleConf: Record<string, string> = {};
 
-        if (prov || modelRaw) {
-          (config.roles as any)[role] = {};
-          if (prov) (config.roles as any)[role].provider = prov;
-          if (modelRaw) (config.roles as any)[role].model = modelRaw;
+        // Provider
+        const provChoice = await selectFromList(rl, PROVIDERS.map(p => ({ id: p, label: `${p}   (${PROVIDER_HINTS[p]})` })),
+          `  Provider [${defaultProvider}]:`, { allowSkip: true, defaultIndex: PROVIDERS.indexOf(defaultProvider as any) });
+        const roleProvider = provChoice ?? defaultProvider;
+        if (roleProvider !== defaultProvider) roleConf.provider = roleProvider;
+
+        // Model (fetch for this provider if different)
+        const roleModels = roleProvider !== defaultProvider
+          ? await (async () => { console.error(`  Fetching models for ${roleProvider}...`); return fetchModelsForProvider(roleProvider); })()
+          : defaultModels;
+
+        if (roleModels.length > 0) {
+          const defaultModelIdx = globalModel ? roleModels.findIndex(m => m.id === globalModel) : -1;
+          const modelHint = roleProvider === defaultProvider && globalModel ? ` [${globalModel}]` : "";
+          const roleModel = await selectFromList(rl, roleModels,
+            `  Model${modelHint}:`,
+            { allowSkip: true, defaultIndex: defaultModelIdx >= 0 ? defaultModelIdx : 0 });
+          const effectiveModel = roleModel ?? (roleProvider === defaultProvider ? globalModel : null);
+          if (effectiveModel) roleConf.model = effectiveModel;
+        }
+
+        // Thinking
+        const defaultThinkIdx = THINKING_LEVELS.findIndex(t => t.id === globalThinking);
+        const roleThinking = await selectFromList(rl, THINKING_LEVELS,
+          `  Reasoning [${globalThinking ?? "normal"}]:`,
+          { allowSkip: true, defaultIndex: defaultThinkIdx >= 0 ? defaultThinkIdx : 0 });
+        const effectiveThinking = roleThinking ?? globalThinking;
+        if (effectiveThinking && effectiveThinking !== globalThinking) roleConf.thinking = effectiveThinking;
+        else if (effectiveThinking) roleConf.thinking = effectiveThinking;
+
+        if (Object.keys(roleConf).length > 0) {
+          (config.roles as any)[role] = roleConf;
+        }
+      }
+    } else {
+      // Apply global model/thinking to all roles
+      if (globalModel || (globalThinking && globalThinking !== "normal")) {
+        for (const role of ["planner", "implementer", "reviewer"] as const) {
+          const roleConf: Record<string, string> = {};
+          if (globalModel) roleConf.model = globalModel;
+          if (globalThinking && globalThinking !== "normal") roleConf.thinking = globalThinking;
+          (config.roles as any)[role] = roleConf;
         }
       }
     }
@@ -534,6 +702,8 @@ const { values: opts } = parseArgs({
     "force-no-alignment": { type: "boolean" },
     "default-provider": { type: "string" },
     "non-interactive": { type: "boolean" },
+    model: { type: "string" },
+    thinking: { type: "string" },
   },
   strict: false,
 });

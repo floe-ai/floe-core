@@ -136,6 +136,7 @@ export class CopilotAdapter implements ProviderAdapter {
       streaming: true,
       onPermissionRequest: this.approveAll,
       ...(systemMessage ? { systemMessage } : {}),
+      ...(config.model ? { model: config.model } : {}),
     });
 
     const id = this.generateId();
@@ -155,6 +156,7 @@ export class CopilotAdapter implements ProviderAdapter {
       metadata: {
         copilotSessionId: copilotSession.sessionId,
         workspacePath: copilotSession.workspacePath,
+        model: config.model,
       },
     };
 
@@ -187,9 +189,11 @@ export class CopilotAdapter implements ProviderAdapter {
     const client = await this.createClient();
     await client.start();
 
+    const storedModel = storedSession.metadata?.model as string | undefined;
     const copilotSession = await client.resumeSession(copilotSessionId, {
       streaming: true,
       onPermissionRequest: this.approveAll,
+      ...(storedModel ? { model: storedModel } : {}),
     });
 
     const now = this.now();
