@@ -21,7 +21,7 @@
  *   edit-dod             Open the DoD file in $EDITOR
  *   list-escalations     List escalation records (optional --status)
  *   resolve-escalation   Resolve an escalation (--escalation <id> --resolution '<text>')
- *   configure            Set up provider defaults (interactive or flags)
+ *   configure            Set up provider defaults (flags or discovery mode)
  *   show-config          Show current provider configuration
  *   list-models          List available models for a provider
  *   update-config        Update provider/model/thinking configuration
@@ -41,7 +41,7 @@
 
 import { parseArgs } from "node:util";
 import { createInterface } from "node:readline";
-import * as p from "@clack/prompts";
+
 import { SessionRegistry } from "../runtime/registry.ts";
 import { ResultStore } from "../runtime/results.ts";
 import { loadDod, formatDodForPrompt } from "../runtime/dod.ts";
@@ -785,13 +785,6 @@ function askLine(rl: ReturnType<typeof createInterface>, question: string): Prom
   return new Promise((resolve) => rl.question(question, resolve));
 }
 
-/** Helper: bail out of the configure flow on cancel. */
-function handleCancel(value: unknown): asserts value is Exclude<typeof value, symbol> {
-  if (p.isCancel(value)) {
-    p.cancel("Configuration cancelled.");
-    process.exit(0);
-  }
-}
 
 /** Fuzzy-match user text against model list. Returns best match or null. */
 function fuzzyMatchModel(input: string, items: ModelChoice[]): ModelChoice | null {
@@ -821,12 +814,13 @@ function fuzzyMatchModel(input: string, items: ModelChoice[]): ModelChoice | nul
 
 async function configureCommand(args: Record<string, any>) {
   const configPath = join(projectRoot, ".floe", "config.json");
-  const nonInteractive = !!args["non-interactive"];
 
-  if (nonInteractive) {
-    const defaultProvider = args["default-provider"];
-    if (!defaultProvider) return { ok: false, error: "configure --non-interactive requires --default-provider <claude|codex|copilot>" };
-    if (!PROVIDERS.includes(defaultProvider as any)) return { ok: false, error: `Invalid provider: ${defaultProvider}. Must be: ${PROVIDERS.join(", ")}` };
+  // ── Direct write mode (flags provided) ──────────────────────────
+  const defaultProvider = args["default-provider"] as string | undefined;
+  if (defaultProvider) {
+    if (!PROVIDERS.includes(defaultProvider as any)) {
+      return { ok: false, error: `Invalid provider: ${defaultProvider}. Must be: ${PROVIDERS.join(", ")}` };
+    }
 
     const rawEnabled = args["enabled-providers"] as string | undefined;
     const enabledProviders = rawEnabled
@@ -854,222 +848,35 @@ async function configureCommand(args: Record<string, any>) {
     return { ok: true, message: `Wrote ${configPath}`, config };
   }
 
-  // ── Interactive mode using @clack/prompts ────────────────────────
+  // ── Discovery mode (no flags) ──────────────────────────────────
+  // Returns available providers + models so the caller (foreman) can
+  // make an informed choice, then call configure again with flags.
 
-  p.intro("floe — provider configuration");
+  const available: Record<string, { hint: string; envDetected: boolean; models: ModelChoice[] }> = {};
 
-  // Auto-detect which providers are available
-  const hasAnthropic = !!process.env.ANTHROPIC_API_KEY;
-  const hasOpenAI = !!process.env.OPENAI_API_KEY;
-  const detectedDefault = hasAnthropic ? "claude" : hasOpenAI ? "codex" : "copilot";
-
-  // 0. Enabled providers — which providers can this repo use?
-  const enabledProviders = await p.multiselect({
-    message: "Which providers do you want to enable for this repo?",
-    options: PROVIDERS.map(prov => ({
-      value: prov,
-      label: prov.charAt(0).toUpperCase() + prov.slice(1),
+  for (const prov of PROVIDERS) {
+    const envDetected =
+      prov === "claude" ? !!process.env.ANTHROPIC_API_KEY :
+      prov === "codex" ? !!process.env.OPENAI_API_KEY :
+      true; // copilot always available via gh CLI
+    const models = await fetchModelsForProvider(prov);
+    available[prov] = {
       hint: PROVIDER_HINTS[prov],
-    })),
-    initialValues: [detectedDefault],
-    required: true,
-  });
-  handleCancel(enabledProviders);
-
-  if ((enabledProviders as string[]).length === 0) {
-    p.log.error("You must enable at least one provider.");
-    process.exit(1);
+      envDetected,
+      models,
+    };
   }
 
-  // 1. Default provider (from enabled set only)
-  const defaultProvider = await p.select({
-    message: "Which provider should workers use by default?",
-    initialValue: (enabledProviders as string[]).includes(detectedDefault) ? detectedDefault : (enabledProviders as string[])[0],
-    options: (enabledProviders as string[]).map(prov => ({
-      value: prov,
-      label: prov.charAt(0).toUpperCase() + prov.slice(1),
-      hint: PROVIDER_HINTS[prov],
-    })),
-  });
-  handleCancel(defaultProvider);
+  const existingConfig = loadConfig(projectRoot);
 
-  // 2. Fetch models with spinner
-  const spin = p.spinner();
-  spin.start(`Fetching available models for ${defaultProvider}...`);
-  const defaultModels = await fetchModelsForProvider(defaultProvider as string);
-  const modelSource = defaultModels === CURATED_MODELS[defaultProvider as string] ? "curated" : "API";
-  spin.stop(`Found ${defaultModels.length} models (${modelSource})`);
-
-  // 3. Model selection
-  let globalModel: string | null = null;
-  if (defaultModels.length > 0) {
-    const modelOptions = [
-      ...defaultModels.map((m, i) => ({
-        value: m.id,
-        label: m.label,
-        hint: i === 0 ? "recommended" : undefined,
-      })),
-      { value: "__custom__", label: "Type a custom model name..." },
-    ];
-
-    const modelChoice = await p.select({
-      message: `Default model for ${defaultProvider}?`,
-      initialValue: defaultModels[0].id,
-      options: modelOptions,
-    });
-    handleCancel(modelChoice);
-
-    if (modelChoice === "__custom__") {
-      const customModel = await p.text({
-        message: "Enter model name or ID:",
-        placeholder: "e.g. claude-sonnet-4, o4-mini",
-        validate(value) {
-          if (!value || value.length < 2) return "Model name must be at least 2 characters";
-        },
-      });
-      handleCancel(customModel);
-      // Try fuzzy matching against known models
-      const match = fuzzyMatchModel(customModel as string, defaultModels);
-      globalModel = match ? match.id : (customModel as string);
-    } else {
-      globalModel = modelChoice as string;
-    }
-  } else {
-    const customModel = await p.text({
-      message: `Default model for ${defaultProvider}?`,
-      placeholder: "Type a model name, or press Enter to skip",
-    });
-    handleCancel(customModel);
-    if (customModel) globalModel = customModel as string;
-  }
-
-  // 4. Thinking level
-  const globalThinking = await p.select({
-    message: "Default reasoning level?",
-    initialValue: "normal",
-    options: [
-      { value: "normal", label: "Normal", hint: "recommended" },
-      { value: "low", label: "Low" },
-      { value: "high", label: "High", hint: "extended thinking" },
-    ],
-  });
-  handleCancel(globalThinking);
-
-  // 5. Per-role customization
-  const config: FloeConfig = { defaultProvider: defaultProvider as string, enabledProviders: enabledProviders as string[], configured: true, roles: {} };
-
-  const customize = await p.confirm({
-    message: "Customize per role? (planner, implementer, reviewer)",
-    initialValue: false,
-  });
-  handleCancel(customize);
-
-  if (customize) {
-    for (const role of ["planner", "implementer", "reviewer"] as const) {
-      p.log.step(`${role}`);
-      const roleConf: Record<string, string> = {};
-
-      // Provider
-      const roleProvider = await p.select({
-        message: `Provider for ${role}?`,
-        initialValue: defaultProvider as string,
-        options: (enabledProviders as string[]).map(prov => ({
-          value: prov,
-          label: prov.charAt(0).toUpperCase() + prov.slice(1),
-          hint: prov === (defaultProvider as string) ? "current default" : PROVIDER_HINTS[prov],
-        })),
-      });
-      handleCancel(roleProvider);
-      if (roleProvider !== defaultProvider) roleConf.provider = roleProvider as string;
-
-      // Model — fetch if different provider
-      const effectiveProvider = roleProvider as string;
-      let roleModels = defaultModels;
-      if (effectiveProvider !== defaultProvider) {
-        spin.start(`Fetching models for ${effectiveProvider}...`);
-        roleModels = await fetchModelsForProvider(effectiveProvider);
-        spin.stop(`Found ${roleModels.length} models`);
-      }
-
-      if (roleModels.length > 0) {
-        const defaultIdx = globalModel ? roleModels.findIndex(m => m.id === globalModel) : 0;
-        const roleModelOptions = [
-          ...roleModels.map((m, i) => ({
-            value: m.id,
-            label: m.label,
-            hint: i === (defaultIdx >= 0 ? defaultIdx : 0) ? "current default" : undefined,
-          })),
-          { value: "__custom__", label: "Type a custom model name..." },
-        ];
-
-        const roleModelChoice = await p.select({
-          message: `Model for ${role}?`,
-          initialValue: defaultIdx >= 0 ? roleModels[defaultIdx].id : roleModels[0].id,
-          options: roleModelOptions,
-        });
-        handleCancel(roleModelChoice);
-
-        if (roleModelChoice === "__custom__") {
-          const custom = await p.text({
-            message: "Enter model name or ID:",
-            placeholder: "e.g. claude-sonnet-4, o4-mini",
-            validate(v) { if (!v || v.length < 2) return "At least 2 characters"; },
-          });
-          handleCancel(custom);
-          const match = fuzzyMatchModel(custom as string, roleModels);
-          roleConf.model = match ? match.id : (custom as string);
-        } else {
-          roleConf.model = roleModelChoice as string;
-        }
-      } else {
-        const customModel = await p.text({
-          message: `Model for ${role}?`,
-          placeholder: "Type a model name, or press Enter to skip",
-        });
-        handleCancel(customModel);
-        if (customModel) roleConf.model = customModel as string;
-      }
-
-      // Thinking
-      const roleThinking = await p.select({
-        message: `Reasoning level for ${role}?`,
-        initialValue: globalThinking as string,
-        options: [
-          { value: "normal", label: "Normal" },
-          { value: "low", label: "Low" },
-          { value: "high", label: "High", hint: "extended thinking" },
-        ],
-      });
-      handleCancel(roleThinking);
-      if (roleThinking !== "normal") roleConf.thinking = roleThinking as string;
-
-      if (Object.keys(roleConf).length > 0) {
-        (config.roles as any)[role] = roleConf;
-      }
-    }
-  } else {
-    // Apply global model/thinking to all roles
-    if (globalModel || (globalThinking !== "normal")) {
-      for (const role of ["planner", "implementer", "reviewer"] as const) {
-        const roleConf: Record<string, string> = {};
-        if (globalModel) roleConf.model = globalModel;
-        if (globalThinking !== "normal") roleConf.thinking = globalThinking as string;
-        (config.roles as any)[role] = roleConf;
-      }
-    }
-  }
-
-  // Clean up empty roles object
-  if (config.roles && Object.keys(config.roles).length === 0) {
-    delete config.roles;
-  }
-
-  mkdirSync(join(projectRoot, ".floe"), { recursive: true });
-  writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
-
-  p.outro(`Configuration saved to ${configPath}`);
-
-  return { ok: true, message: `Wrote ${configPath}`, config };
+  return {
+    ok: true,
+    action: "choose",
+    message: "No flags provided. Use the information below to choose, then call: configure --default-provider <provider> [--enabled-providers <csv>] [--model <model>] [--thinking <level>]",
+    providers: available,
+    thinkingLevels: THINKING_LEVELS.map(t => t.id),
+    currentConfig: existingConfig ?? null,
+  };
 }
 
 // ─── Config management commands ──────────────────────────────────────

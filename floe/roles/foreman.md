@@ -40,16 +40,16 @@ After reading runtime state (step 1 of startup), check provider configuration be
 
 1. Check config: `bun run .floe/bin/floe.ts show-config`
 2. If config is missing or `configured` is `false`:
-   - Tell the user: "Provider configuration hasn't been completed yet. Let's set up your models before we start."
-   - Run: `bun run .floe/bin/floe.ts configure`
+   - Run: `bun run .floe/bin/floe.ts configure` (no flags) — this returns available providers, their models, and environment detection as JSON
+   - Read the output. Present the real choices to the user (e.g. "I see Copilot is available with these models: claude-sonnet-4, gpt-4o, o3-mini. Which should I use?")
+   - Once the user chooses, write the config: `bun run .floe/bin/floe.ts configure --default-provider <choice> --enabled-providers <csv> --model <model> --thinking <level>`
    - This is a one-time step — once complete, it won't trigger again
 3. If config exists but `enabledProviders` is not set:
-   - Tell the user: "Provider allowlist hasn't been configured. Let's set which providers are enabled for this repo."
-   - Run: `bun run .floe/bin/floe.ts configure`
+   - Same flow: run `configure` (no flags) to discover, present choices, then write with flags
 4. Confirm that all role-specific providers (if any) are within the enabled set. If a role maps to a disabled provider, stop and tell the user.
 5. If config exists and `configured` is `true` (or the field is absent — backward-compatible) and `enabledProviders` is set: proceed normally
 
-This check happens BEFORE any pipeline launch. The Foreman never launches workers without valid provider configuration.
+**Important:** Do NOT drive a TUI wizard. You see the available models directly from the configure discovery output. Present real choices to the user and write the config yourself.
 
 ---
 
@@ -206,9 +206,10 @@ bun run .floe/bin/floe.ts list-active-workers
 bun run .floe/bin/floe.ts check-alignment --feature <id>
 
 # Configuration
-bun run .floe/bin/floe.ts configure                     # interactive provider setup
-bun run .floe/bin/floe.ts show-config                    # show current config
-bun run .floe/bin/floe.ts list-models --provider <name>  # list available models
+bun run .floe/bin/floe.ts configure                                     # discovery — returns available providers + models as JSON
+bun run .floe/bin/floe.ts configure --default-provider copilot --model claude-sonnet-4  # write config directly
+bun run .floe/bin/floe.ts show-config                                   # show current config
+bun run .floe/bin/floe.ts list-models --provider <name>                 # list available models
 bun run .floe/bin/floe.ts update-config --role <role|all> --model <id> [--thinking <level>]
 ```
 
@@ -353,7 +354,7 @@ When the user mentions a model, provider, or thinking level in plain text (e.g. 
 
 If the user's input is ambiguous (could match multiple models), show the options and ask. If it matches nothing, show the available models from `list-models` and ask the user to pick.
 
-If no `.floe/config.json` exists yet, offer to run the full interactive `configure` instead.
+If no `.floe/config.json` exists yet, run `configure` (no flags) to discover available providers/models, then present choices and write the config.
 
 ---
 
