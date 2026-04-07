@@ -626,6 +626,31 @@ switch (cmd) {
     const featureId = args.feature as string;
     if (!featureId) fail("Usage: feature-runner run --feature <id>");
 
+    // If state doesn't exist yet but session IDs were provided, initialise first
+    if (!existsSync(statePath(featureId))) {
+      const implSessionId = args["impl-session"] as string;
+      const revSessionId = args["rev-session"] as string;
+      if (!implSessionId || !revSessionId) {
+        fail("No run state found and --impl-session / --rev-session not provided. Use 'start' first.");
+      }
+      const feature = getFeatureArtefact(featureId);
+      if (!feature) fail(`Feature artefact not found: ${featureId}`);
+      const now = timestamp();
+      const initial: FeatureRunState = {
+        featureId,
+        implSessionId,
+        revSessionId,
+        phase: "alignment",
+        round: 0,
+        maxRounds: 3,
+        lastAction: "",
+        startedAt: now,
+        updatedAt: now,
+        outcome: null,
+      };
+      saveState(initial);
+    }
+
     let state = loadState(featureId);
     while (!TERMINAL_PHASES.includes(state.phase)) {
       state = tick(state);

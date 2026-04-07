@@ -587,10 +587,10 @@ async function manageFeaturePair(args: Record<string, any>) {
 
   // Resolve providers for implementer and reviewer independently
   const implResolved = args["implementer-provider"]
-    ? { provider: args["implementer-provider"] }
+    ? validateEnabledProvider({ provider: args["implementer-provider"] }, config)
     : resolveProvider("implementer", args, config);
   const revResolved = args["reviewer-provider"]
-    ? { provider: args["reviewer-provider"] }
+    ? validateEnabledProvider({ provider: args["reviewer-provider"] }, config)
     : resolveProvider("reviewer", args, config);
 
   if (implResolved.error) return { ok: false, error: implResolved.error };
@@ -601,7 +601,11 @@ async function manageFeaturePair(args: Record<string, any>) {
     launchWorker({ role: "reviewer", provider: revResolved.provider, feature: args.feature, epic: args.epic, release: args.release }),
   ]);
 
-  // Spawn feature runner in background
+  // Check both workers launched successfully before spawning runner
+  if (!(implementer as any).ok) return { ok: false, error: `Implementer launch failed: ${(implementer as any).error ?? "unknown error"}` };
+  if (!(reviewer as any).ok) return { ok: false, error: `Reviewer launch failed: ${(reviewer as any).error ?? "unknown error"}` };
+
+  // Spawn feature runner in background — "run" will initialise state if needed, then loop to completion
   const featureRunnerPath = join(dirname(import.meta.dir), "scripts", "feature-runner.ts");
   const child = Bun.spawn(["bun", "run", featureRunnerPath, "run",
     "--feature", args.feature,
