@@ -40,16 +40,22 @@ After reading runtime state (step 1 of startup), check provider configuration be
 
 1. Check config: `bun run .floe/bin/floe.ts show-config`
 2. If config is missing or `configured` is `false`:
-   - Run: `bun run .floe/bin/floe.ts configure` (no flags) — this returns available providers, their models, and environment detection as JSON
-   - Read the output. Present the real choices to the user (e.g. "I see Copilot is available with these models: claude-sonnet-4, gpt-4o, o3-mini. Which should I use?")
-   - Once the user chooses, write the config: `bun run .floe/bin/floe.ts configure --default-provider <choice> --enabled-providers <csv> --model <model> --thinking <level>`
+   - Run: `bun run .floe/bin/floe.ts configure` (no flags) — this returns which provider SDKs are installed and detected
+   - **You ARE the model discovery.** You are running inside a provider (Copilot, Codex, or Claude). You can see your own available models from your environment. Present those to the user.
+   - Make a recommendation based on what you can see: "I'm running on claude-opus-4.6 via Copilot. I can also see gpt-5.4, claude-sonnet-4.6, gpt-4.1, etc. For worker sessions, I'd recommend [model] because [reason]."
+   - Provide a quick path: "Want to go with that, or type a different model name?"
+   - If the user agrees or picks a model, write the config immediately: `bun run .floe/bin/floe.ts configure --default-provider <provider> --enabled-providers <csv> --model <model> --thinking <level>`
    - This is a one-time step — once complete, it won't trigger again
 3. If config exists but `enabledProviders` is not set:
-   - Same flow: run `configure` (no flags) to discover, present choices, then write with flags
+   - Same flow: run discovery, present your own models, recommend, write config
 4. Confirm that all role-specific providers (if any) are within the enabled set. If a role maps to a disabled provider, stop and tell the user.
 5. If config exists and `configured` is `true` (or the field is absent — backward-compatible) and `enabledProviders` is set: proceed normally
 
-**Important:** Do NOT drive a TUI wizard. You see the available models directly from the configure discovery output. Present real choices to the user and write the config yourself.
+**Critical rules:**
+- Do NOT present hardcoded model lists. You can see your own models — present those.
+- Do NOT drive a TUI wizard. The configure command is a data endpoint. You own the UX.
+- Model names are free text — the provider SDK validates them at session creation time.
+- If the user types a model name you don't recognise, pass it through anyway. The SDK will reject it if invalid.
 
 ---
 
@@ -347,14 +353,13 @@ If escalations exist:
 When the user mentions a model, provider, or thinking level in plain text (e.g. "use opus", "switch implementer to codex", "turn on high thinking"), treat it as a config correction request:
 
 1. **Check current config**: `bun run .floe/bin/floe.ts show-config`
-2. **Query available models**: `bun run .floe/bin/floe.ts list-models --provider <provider>`
-3. **Match the user's input** to the closest valid model ID from the list (e.g. "opus" → `claude-opus-4-20250514`, "4.1" → `gpt-4.1`)
-4. **Apply the change**: `bun run .floe/bin/floe.ts update-config --role <role|all> --model <exact-id> [--thinking <level>]`
-5. **Confirm** to the user what was changed
+2. **Match the user's input** to a model you can see in your own environment (e.g. "opus" → `claude-opus-4.6`, "gpt 5" → `gpt-5.4`)
+3. **Apply the change**: `bun run .floe/bin/floe.ts update-config --role <role|all> --model <exact-id> [--thinking <level>]`
+4. **Confirm** to the user what was changed
 
-If the user's input is ambiguous (could match multiple models), show the options and ask. If it matches nothing, show the available models from `list-models` and ask the user to pick.
+If the user's input is ambiguous, present the models you can see and ask. Model names are free text passed directly to the SDK — the SDK validates them.
 
-If no `.floe/config.json` exists yet, run `configure` (no flags) to discover available providers/models, then present choices and write the config.
+If no `.floe/config.json` exists yet, run the full configure discovery flow (see Pre-flight above).
 
 ---
 

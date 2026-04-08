@@ -40,7 +40,7 @@
  */
 
 import { parseArgs } from "node:util";
-import { createInterface } from "node:readline";
+
 
 import { SessionRegistry } from "../runtime/registry.ts";
 import { ResultStore } from "../runtime/results.ts";
@@ -698,31 +698,12 @@ async function resolveEscalation(args: Record<string, any>) {
 
 const PROVIDERS = ["claude", "codex", "copilot"] as const;
 const PROVIDER_HINTS: Record<string, string> = {
-  claude: "requires ANTHROPIC_API_KEY",
-  codex: "OPENAI_API_KEY or local sign-in",
-  copilot: "uses GitHub CLI credentials",
+  claude: "requires ANTHROPIC_API_KEY + @anthropic-ai/claude-agent-sdk",
+  codex: "@openai/codex-sdk (API key or local ChatGPT sign-in)",
+  copilot: "@github/copilot-sdk (uses GitHub CLI credentials)",
 };
 
 interface ModelChoice { id: string; label: string }
-
-const CURATED_MODELS: Record<string, ModelChoice[]> = {
-  claude: [
-    { id: "claude-sonnet-4-20250514", label: "Claude Sonnet 4" },
-    { id: "claude-opus-4-20250514", label: "Claude Opus 4" },
-    { id: "claude-haiku-4-20250514", label: "Claude Haiku 4" },
-  ],
-  codex: [
-    { id: "o3-mini", label: "o3-mini" },
-    { id: "o4-mini", label: "o4-mini" },
-    { id: "gpt-4.1", label: "GPT-4.1" },
-  ],
-  copilot: [
-    { id: "gpt-4o", label: "GPT-4o" },
-    { id: "claude-sonnet-4", label: "Claude Sonnet 4" },
-    { id: "o3-mini", label: "o3-mini" },
-    { id: "gpt-4.1", label: "GPT-4.1" },
-  ],
-};
 
 const THINKING_LEVELS: ModelChoice[] = [
   { id: "normal", label: "normal (default)" },
@@ -730,60 +711,88 @@ const THINKING_LEVELS: ModelChoice[] = [
   { id: "high", label: "high (extended thinking)" },
 ];
 
-const modelCache = new Map<string, ModelChoice[]>();
+// ── SDK availability detection ───────────────────────────────────────
+
+async function isSdkAvailable(pkg: string): Promise<boolean> {
+  try {
+    await import(pkg);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+interface ProviderDetection {
+  sdkInstalled: boolean;
+  credentialsDetected: boolean;
+  hint: string;
+}
+
+async function detectProviders(): Promise<Record<string, ProviderDetection>> {
+  const [copilotSdk, codexSdk, claudeSdk] = await Promise.all([
+    isSdkAvailable("@github/copilot-sdk"),
+    isSdkAvailable("@openai/codex-sdk"),
+    isSdkAvailable("@anthropic-ai/claude-agent-sdk"),
+  ]);
+
+  return {
+    copilot: {
+      sdkInstalled: copilotSdk,
+      credentialsDetected: copilotSdk, // Copilot SDK uses gh CLI creds automatically
+      hint: PROVIDER_HINTS.copilot,
+    },
+    codex: {
+      sdkInstalled: codexSdk,
+      credentialsDetected: codexSdk || !!process.env.OPENAI_API_KEY,
+      hint: PROVIDER_HINTS.codex,
+    },
+    claude: {
+      sdkInstalled: claudeSdk,
+      credentialsDetected: !!process.env.ANTHROPIC_API_KEY,
+      hint: PROVIDER_HINTS.claude,
+    },
+  };
+}
+
+// ── API model listing (bonus — used by list-models if credentials exist) ─────
 
 async function fetchClaudeModels(): Promise<ModelChoice[]> {
   const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) return CURATED_MODELS.claude;
+  if (!key) return [];
   try {
     const res = await fetch("https://api.anthropic.com/v1/models", {
       headers: { "x-api-key": key, "anthropic-version": "2023-06-01" },
     });
-    if (!res.ok) return CURATED_MODELS.claude;
+    if (!res.ok) return [];
     const data = (await res.json()) as { data?: { id: string; display_name?: string }[] };
-    const models = (data.data ?? [])
+    return (data.data ?? [])
       .filter(m => m.id && !m.id.includes("embed"))
       .map(m => ({ id: m.id, label: m.display_name ?? m.id }))
       .sort((a, b) => a.id.localeCompare(b.id));
-    return models.length > 0 ? models : CURATED_MODELS.claude;
   } catch {
-    return CURATED_MODELS.claude;
+    return [];
   }
 }
 
 async function fetchOpenAIModels(): Promise<ModelChoice[]> {
   const key = process.env.OPENAI_API_KEY;
-  if (!key) return CURATED_MODELS.codex;
+  if (!key) return [];
   try {
     const res = await fetch("https://api.openai.com/v1/models", {
       headers: { Authorization: `Bearer ${key}` },
     });
-    if (!res.ok) return CURATED_MODELS.codex;
+    if (!res.ok) return [];
     const data = (await res.json()) as { data?: { id: string }[] };
-    const relevant = new Set(["o3-mini", "o4-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "gpt-4o", "gpt-4o-mini", "o3", "o4"]);
-    const models = (data.data ?? [])
-      .filter(m => m.id && relevant.has(m.id))
+    return (data.data ?? [])
+      .filter(m => m.id)
       .map(m => ({ id: m.id, label: m.id }))
       .sort((a, b) => a.id.localeCompare(b.id));
-    return models.length > 0 ? models : CURATED_MODELS.codex;
   } catch {
-    return CURATED_MODELS.codex;
+    return [];
   }
 }
 
-async function fetchModelsForProvider(provider: string): Promise<ModelChoice[]> {
-  if (modelCache.has(provider)) return modelCache.get(provider)!;
-  let models: ModelChoice[];
-  if (provider === "claude") models = await fetchClaudeModels();
-  else if (provider === "codex") models = await fetchOpenAIModels();
-  else models = CURATED_MODELS[provider] ?? [];
-  modelCache.set(provider, models);
-  return models;
-}
 
-function askLine(rl: ReturnType<typeof createInterface>, question: string): Promise<string> {
-  return new Promise((resolve) => rl.question(question, resolve));
-}
 
 
 /** Fuzzy-match user text against model list. Returns best match or null. */
@@ -849,33 +858,26 @@ async function configureCommand(args: Record<string, any>) {
   }
 
   // ── Discovery mode (no flags) ──────────────────────────────────
-  // Returns available providers + models so the caller (foreman) can
-  // make an informed choice, then call configure again with flags.
+  // Returns SDK availability + any API-fetchable models.
+  // The Foreman (which IS running inside a provider) should present
+  // its own visible models to the user and make a recommendation.
 
-  const available: Record<string, { hint: string; envDetected: boolean; models: ModelChoice[] }> = {};
-
-  for (const prov of PROVIDERS) {
-    const envDetected =
-      prov === "claude" ? !!process.env.ANTHROPIC_API_KEY :
-      prov === "codex" ? !!process.env.OPENAI_API_KEY :
-      true; // copilot always available via gh CLI
-    const models = await fetchModelsForProvider(prov);
-    available[prov] = {
-      hint: PROVIDER_HINTS[prov],
-      envDetected,
-      models,
-    };
-  }
-
+  const providers = await detectProviders();
   const existingConfig = loadConfig(projectRoot);
 
   return {
     ok: true,
     action: "choose",
-    message: "No flags provided. Use the information below to choose, then call: configure --default-provider <provider> [--enabled-providers <csv>] [--model <model>] [--thinking <level>]",
-    providers: available,
+    message: [
+      "Provider detection complete. Review the results below.",
+      "You (the Foreman) can see your own available models — present those to the user.",
+      "The user can type any model name as free text. The provider SDK validates at session creation.",
+      "Once decided, call: configure --default-provider <provider> [--enabled-providers <csv>] [--model <model>] [--thinking <level>]",
+    ].join(" "),
+    providers,
     thinkingLevels: THINKING_LEVELS.map(t => t.id),
     currentConfig: existingConfig ?? null,
+    note: "Model names are free text. The Foreman should present its own visible models and recommend one. Do NOT present hardcoded model lists.",
   };
 }
 
@@ -899,13 +901,37 @@ async function listModels(args: Record<string, any>) {
   if (!PROVIDERS.includes(provider as any)) {
     return { ok: false, error: `Invalid provider: ${provider}. Must be: ${PROVIDERS.join(", ")}` };
   }
+
   if (provider === "copilot") {
-    return { ok: true, provider, source: "curated", models: CURATED_MODELS.copilot, note: "Copilot supports multiple models via SDK — type any model name if not listed" };
+    return {
+      ok: true,
+      provider,
+      source: "sdk",
+      models: [],
+      note: "Copilot model selection is handled by the SDK. The Foreman can see its own available models — ask it what's available.",
+    };
   }
-  const models = await fetchModelsForProvider(provider);
-  const source = (provider === "claude" && process.env.ANTHROPIC_API_KEY)
-    || (provider === "codex" && process.env.OPENAI_API_KEY) ? "api" : "curated";
-  return { ok: true, provider, source, models };
+
+  let models: ModelChoice[] = [];
+  let source = "unavailable";
+
+  if (provider === "claude") {
+    models = await fetchClaudeModels();
+    source = models.length > 0 ? "api" : "unavailable";
+  } else if (provider === "codex") {
+    models = await fetchOpenAIModels();
+    source = models.length > 0 ? "api" : "unavailable";
+  }
+
+  return {
+    ok: true,
+    provider,
+    source,
+    models,
+    note: models.length === 0
+      ? "Could not fetch models from API. Type any valid model name — the SDK validates at session creation."
+      : undefined,
+  };
 }
 
 async function updateConfig(args: Record<string, any>) {
