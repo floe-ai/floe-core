@@ -374,13 +374,17 @@ Release
 
 ### Sizing heuristic
 
+**See:** `.floe/skills/sizing-heuristics/SKILL.md` for the canonical sizing reference.
+
 | Level | Size | Example |
 |-------|------|---------|
 | **Release** | The whole deliverable | "Producer Brain Cache — MVP" |
-| **Epic** | A deployable vertical slice or major capability area | "Working backend with persistence", "Semantic search system" |
+| **Epic** | One independently deployable vertical slice — must be demonstrable and valuable on its own | "Working backend with persistence", "Semantic search system" |
 | **Feature** | One coherent outcome that one implementer/reviewer pair can own end-to-end — may require multiple implementation/review loops | "Full note CRUD with API and persistence", "Embedding engine with search endpoint" |
 | **Tasks** | Ephemeral steps within a feature — not stored | "scaffold Vite", "add CORS config" |
 
 Do not split features purely because they contain several internal coding steps. A feature is too large only when a single implementer/reviewer pair cannot own the outcome end-to-end. If an item feels like a setup step or a single UI component, it is a task, not a feature.
 
 Features are the unit of work. Epics and releases are organisational containers. Tasks are ephemeral working notes, not durable files.
+
+**Sizing is the Planner's job, not yours.** Do NOT pass sizing hints, epic count suggestions, or "this is a small project" guidance when launching the Planner. The Planner has full access to the release intent, notes, and acceptance criteria — it self-calibrates. Your role is to **review** the Planner's output and challenge obvious over-splits before proceeding.

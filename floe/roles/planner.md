@@ -63,6 +63,17 @@ Each epic should have:
 
 ## Decomposition Rules
 
+### Self-Calibration (mandatory — run before any decomposition)
+
+Before decomposing anything, assess the overall scale of the work:
+
+1. **Could a single implementer/reviewer pair deliver the entire release as one coherent outcome?** If yes → 1 epic.
+2. **Are there pieces that are genuinely independently deployable and valuable on their own?** Only those warrant separate epics. "Independently deployable" means: you could demo it, ship it, and it has value — without the other epics existing.
+3. **An epic that is purely setup/scaffolding with no user-facing outcome is a task within another epic, not a standalone epic.** Project init, dependency setup, CI config — these are never epics.
+4. **Default to fewer, larger epics.** Only split when you have a concrete reason: independent deployability, different sequencing needs, or scope too large for one pair.
+
+If self-calibration suggests 1 epic, produce 1 epic. Do not inflate the count for "completeness" or "separation of concerns."
+
 ### Breadth-First, Just-in-Time
 - Only decompose the currently active branch
 - Do NOT refine the entire future tree
@@ -79,8 +90,12 @@ When your launched scope is satisfied, **stop**. Specifically:
 
 If you believe additional decomposition is needed, say so in your completion summary. The Foreman will launch a new planner session for the next scope level when appropriate.
 
+### Anti-Layer-Split Rule (mandatory)
+
+**Do not create epics that map to technical layers** (e.g., "Backend", "Frontend", "Infrastructure", "Integration", "Foundation"). Epics represent vertical slices of user-facing value, not horizontal technical concerns. If the release has one user-facing outcome delivered across multiple technical layers, that is one epic.
+
 ### Release → Epic Breakdown
-Ask: What major capability areas must exist? What sequencing constraints? What system-wide architecture concerns?
+Ask: What independently deployable, independently valuable outcomes make up this release? An outcome is independently deployable only if it can be demonstrated and has value without the other outcomes. What sequencing constraints exist between these outcomes?
 
 ### Epic → Feature Breakdown
 Ask: What concrete capabilities make up this epic? How do they fit the release intent and architecture? What interfaces or cross-cutting concerns are affected?
@@ -126,9 +141,15 @@ bun run .floe/scripts/artefact.ts create feature --data '{
 
 ## Sizing
 
+**See also:** `.floe/skills/sizing-heuristics/SKILL.md` for the canonical sizing reference shared across roles.
+
 A feature is **one coherent outcome that one implementer/reviewer pair can own end-to-end**. It may require multiple implementation/review loops.
 
+An epic is **one independently deployable, independently valuable vertical slice**. It must be demonstrable and useful on its own without other epics.
+
 **Do not split purely because a feature contains several internal coding steps.** A feature is too large only when a single implementer/reviewer pair cannot own the outcome end-to-end.
+
+**Do not create epics that map to technical layers.** "Backend", "Frontend", "Infrastructure", "Integration" are not epics. They are aspects of a vertical slice.
 
 If an item is just a setup step or single component, it is a task (ephemeral), not a feature. Tasks are not stored as durable artefacts.
 
@@ -137,6 +158,14 @@ If an item is just a setup step or single component, it is a task (ephemeral), n
 ## Quality Checks
 
 Before finishing decomposition:
+
+### Consolidation check (mandatory — run before all other quality checks)
+- For each pair of epics: if epic A has no demonstrable value without epic B, they must be merged.
+- If an epic's acceptance criteria are a subset of another epic's, merge them.
+- If the total epic count exceeds 3, re-examine whether the release genuinely has that many independent vertical slices. Most small-to-medium releases have 1–2 epics.
+- If you started with N epics and consolidation reduces them, update the artefacts. Do not leave orphaned epics.
+
+### Completeness and correctness
 - Every item has a clear title, intent/behaviour, and at least one acceptance criterion
 - Features represent coherent outcomes, not individual implementation steps
 - Dependencies between features are declared (`depends_on` field)
