@@ -4,7 +4,8 @@
  *   bunx github:floe-ai/floe-core
  *
  * Single-step install: copies .floe/ directory (scripts, schemas, roles,
- * runtime, CLI entrypoint), installs provider agent files, scaffolds the
+ * skills, runtime, CLI entrypoint), installs provider skill pointers and
+ * foreman wrappers, scaffolds the
  * delivery structure, and installs dependencies.
  *
  * Flags:
@@ -19,7 +20,7 @@
  * Prerequisites: bun ≥ 1.0
  */
 
-import { existsSync, mkdirSync, rmSync, cpSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, cpSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { createInterface } from "node:readline";
 import { homedir } from "node:os";
@@ -42,26 +43,40 @@ function floeSourceDir(): string {
   throw new Error(`Floe source not found at: ${candidate}`);
 }
 
-function agentSourceDir(client: Client): string {
-  const candidate = join(PACKAGE_ROOT, "agents", client);
-  if (existsSync(candidate)) return candidate;
-  throw new Error(`Agent source not found for ${client} at: ${candidate}`);
+interface SkillSpec {
+  name: string;
+  description: string;
 }
 
-function skillTargetDir(client: Client, projectRoot: string): string {
+const INSTALLABLE_SKILLS: SkillSpec[] = [
+  {
+    name: "floe-exec",
+    description: "Structured delivery framework. See .floe/skills/floe-exec/SKILL.md for full rules.",
+  },
+  {
+    name: "sizing-heuristics",
+    description: "Canonical sizing heuristics shared across planning and execution roles.",
+  },
+];
+
+function skillRootDir(client: Client, projectRoot: string): string {
   const dirs: Record<Client, string> = {
-    codex: join(projectRoot, ".agents", "skills", "floe-exec"),
-    copilot: join(projectRoot, ".github", "skills", "floe-exec"),
-    claude: join(projectRoot, ".claude", "skills", "floe-exec"),
+    codex: join(projectRoot, ".agents", "skills"),
+    copilot: join(projectRoot, ".github", "skills"),
+    claude: join(projectRoot, ".claude", "skills"),
   };
   return dirs[client];
 }
 
-function agentTargetDir(client: Client, projectRoot: string): string {
+function skillTargetDir(client: Client, projectRoot: string, skillName: string): string {
+  return join(skillRootDir(client, projectRoot), skillName);
+}
+
+function agentTargetFile(client: Client, projectRoot: string): string {
   const dirs: Record<Client, string> = {
-    codex: projectRoot,
-    copilot: join(projectRoot, ".github", "agents"),
-    claude: join(projectRoot, ".claude", "agents"),
+    codex: join(projectRoot, "AGENTS.md"),
+    copilot: join(projectRoot, ".github", "agents", "foreman.agent.md"),
+    claude: join(projectRoot, ".claude", "agents", "foreman.md"),
   };
   return dirs[client];
 }
@@ -101,15 +116,6 @@ async function confirm(rl: ReturnType<typeof createInterface>, message: string):
 
 // ── Installation ──────────────────────────────────────────────────────
 
-function copyDir(source: string, dest: string, force: boolean): void {
-  if (existsSync(dest)) {
-    if (!force) throw new Error(`Already exists: ${dest} (use --force to overwrite)`);
-    rmSync(dest, { recursive: true, force: true });
-  }
-  mkdirSync(resolve(dest, ".."), { recursive: true });
-  cpSync(source, dest, { recursive: true });
-}
-
 function installFloeDir(projectRoot: string, force: boolean): void {
   const source = floeSourceDir();
   const dest = join(projectRoot, ".floe");
@@ -121,8 +127,8 @@ function installFloeDir(projectRoot: string, force: boolean): void {
 
   mkdirSync(dest, { recursive: true });
 
-  // Copy subdirectories: bin, scripts, schemas, roles, runtime
-  for (const subdir of ["bin", "scripts", "schemas", "roles", "runtime"]) {
+  // Copy canonical install payload from floe/
+  for (const subdir of ["bin", "scripts", "schemas", "roles", "runtime", "skills"]) {
     const src = join(source, subdir);
     if (existsSync(src)) {
       cpSync(src, join(dest, subdir), { recursive: true });
@@ -136,13 +142,10 @@ function installFloeDir(projectRoot: string, force: boolean): void {
       cpSync(src, join(dest, file));
     }
   }
-
-  // Create memory directory (empty, for floe-mem)
-  mkdirSync(join(dest, "memory"), { recursive: true });
 }
 
-function createThinSkillPointer(client: Client, projectRoot: string, force: boolean): void {
-  const targetDir = skillTargetDir(client, projectRoot);
+function createThinSkillPointer(client: Client, projectRoot: string, skill: SkillSpec, force: boolean): void {
+  const targetDir = skillTargetDir(client, projectRoot, skill.name);
   const skillMdPath = join(targetDir, "SKILL.md");
 
   if (existsSync(skillMdPath) && !force) {
@@ -153,11 +156,11 @@ function createThinSkillPointer(client: Client, projectRoot: string, force: bool
 
   const content = [
     "---",
-    "name: floe-exec",
-    "description: Structured delivery framework. See .floe/ for full docs.",
+    `name: ${skill.name}`,
+    `description: ${skill.description}`,
     "---",
     "",
-    "The full skill definition is at: `.floe/SKILL.md`",
+    `The full skill definition is at: \`.floe/skills/${skill.name}/SKILL.md\``,
     "",
     "Read that file and follow it.",
     "",
@@ -166,23 +169,76 @@ function createThinSkillPointer(client: Client, projectRoot: string, force: bool
   writeFileSync(skillMdPath, content, "utf-8");
 }
 
-function installAgents(client: Client, projectRoot: string, force: boolean): string {
-  const sourceDir = agentSourceDir(client);
-  const targetDir = agentTargetDir(client, projectRoot);
+function buildForemanWrapper(client: Client): string {
+  const shared = [
+    "You are the **Foreman** for this project's Floe execution framework.",
+    "",
+    "## Canonical role definition",
+    "",
+    "Your full role definition is at: `.floe/roles/foreman.md`",
+    "",
+    "Read that file now and follow it exactly.",
+    "",
+    "## First-turn ritual",
+    "",
+    "1. Read state: `bun run .floe/scripts/state.ts get`",
+    "2. Check active pointers reference real artefacts",
+    "3. Classify user message (continuation, intake, setup, interruption, brainstorming)",
+    "4. Choose mode before doing anything else",
+    "",
+    "## Hard constraints — you MUST NOT:",
+    "",
+    "- **Implement code** — you never write production code. Launch workers instead.",
+    "- **Create epics or features** — all decomposition below release is the Planner's job.",
+    "- **Decompose beyond the current routing decision** — launch the Planner, don't plan yourself.",
+    "- **Skip state read** — always read state before acting.",
+    "- **Send implementation instructions without approved alignment** — run `check-alignment` first.",
+    "- **Resolve architecture/technology decisions** — surface them to the user.",
+    "",
+  ];
 
   if (client === "codex") {
-    const source = join(sourceDir, "AGENTS.md");
-    const dest = join(targetDir, "AGENTS.md");
-    if (existsSync(dest) && !force) {
-      throw new Error(`Already exists: ${dest} (use --force to overwrite)`);
-    }
-    mkdirSync(targetDir, { recursive: true });
-    cpSync(source, dest);
-    return dest;
-  } else {
-    copyDir(sourceDir, targetDir, force);
-    return targetDir;
+    return ["# floe-core — Foreman Agent", "", ...shared].join("\n");
   }
+
+  return [
+    "---",
+    'name: "Foreman"',
+    'description: "Execution framework process controller. Routes work, manages state, and enforces lifecycle boundaries."',
+    "---",
+    "",
+    ...shared,
+  ].join("\n");
+}
+
+function installAgentWrapper(client: Client, projectRoot: string, force: boolean): string {
+  const targetPath = agentTargetFile(client, projectRoot);
+  if (existsSync(targetPath) && !force) {
+    throw new Error(`Already exists: ${targetPath} (use --force to overwrite)`);
+  }
+  mkdirSync(resolve(targetPath, ".."), { recursive: true });
+  writeFileSync(targetPath, buildForemanWrapper(client), "utf-8");
+  return targetPath;
+}
+
+function ensureDodFile(projectRoot: string): boolean {
+  const dodPath = join(projectRoot, ".floe", "dod.json");
+  if (existsSync(dodPath)) return false;
+
+  const dodDefault = {
+    version: 1,
+    criteria: [
+      { id: "tests-pass", category: "quality", description: "All existing tests pass. No test regressions introduced.", severity: "required" },
+      { id: "acceptance-met", category: "correctness", description: "All acceptance criteria from the feature artefact are satisfied.", severity: "required" },
+      { id: "no-regressions", category: "quality", description: "No regressions in the area touched by the change.", severity: "required" },
+      { id: "code-reviewed", category: "quality", description: "Code has been reviewed by the Reviewer role and all critical/major findings resolved.", severity: "required" },
+      { id: "docs-updated", category: "documentation", description: "Documentation updated if the change affects public APIs, configuration, or user-facing behaviour.", severity: "recommended" },
+      { id: "no-security-issues", category: "security", description: "No known security vulnerabilities introduced. Secrets not committed.", severity: "required" },
+    ],
+    notes: "This is the project-level Definition of Done. Edit .floe/dod.json to customise criteria for your project.",
+  };
+  writeFileSync(dodPath, JSON.stringify(dodDefault, null, 2) + "\n", "utf-8");
+  return true;
 }
 
 // ── Scaffold ──────────────────────────────────────────────────────────
@@ -211,8 +267,6 @@ function scaffoldProject(projectRoot: string): string[] {
     "# Runtime state — not committed",
     "state/",
     "node_modules/",
-    "memory/*.db",
-    "memory/*.db-*",
     "",
   ].join("\n");
   if (!existsSync(floeGitignore)) {
@@ -326,8 +380,8 @@ async function main() {
     if (!values["yes"] && !nonInteractive && process.stdout.isTTY) {
       console.log(`\n  floe-core will be installed for:\n`);
       for (const c of clients) {
-        console.log(`    ${c.padEnd(10)}  skill → ${shortPath(skillTargetDir(c, projectRoot))}`);
-        console.log(`    ${" ".repeat(10)}  agents → ${shortPath(agentTargetDir(c, projectRoot))}`);
+        console.log(`    ${c.padEnd(10)}  skills → ${shortPath(skillRootDir(c, projectRoot))} (${INSTALLABLE_SKILLS.length} pointers)`);
+        console.log(`    ${" ".repeat(10)}  agent → ${shortPath(agentTargetFile(c, projectRoot))}`);
       }
       console.log(`\n  Shared framework → ${shortPath(join(projectRoot, ".floe"))}`);
       if (shouldScaffold) console.log("  Project structure will be scaffolded.");
@@ -347,6 +401,9 @@ async function main() {
     try {
       installFloeDir(projectRoot, force);
       console.log(`  ✓ .floe/ framework installed`);
+      if (ensureDodFile(projectRoot)) {
+        console.log(`  ✓ .floe/dod.json created`);
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`  ✗ .floe/ — ${msg}`);
@@ -359,8 +416,10 @@ async function main() {
 
     for (const c of clients) {
       try {
-        createThinSkillPointer(c, projectRoot, force);
-        installAgents(c, projectRoot, force);
+        for (const skill of INSTALLABLE_SKILLS) {
+          createThinSkillPointer(c, projectRoot, skill, force);
+        }
+        installAgentWrapper(c, projectRoot, force);
         results.push({ client: c, status: "ok" });
         console.log(`  ✓ ${c}`);
       } catch (err) {

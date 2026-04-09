@@ -14,17 +14,20 @@ Works with **Codex**, **Copilot CLI**, and **Claude Code** as the foreman (user-
 .floe/ (installed into your project)
   ├── bin/floe.ts           CLI entrypoint for worker management
   ├── roles/                Canonical role definitions (foreman, planner, implementer, reviewer)
+  ├── skills/               Canonical skill definitions (floe-exec, sizing-heuristics)
   ├── schemas/              JSON schemas for all durable artefacts
   ├── scripts/              Deterministic Bun scripts for state/artefact operations
   ├── runtime/              Provider adapters + session registry
   │   ├── adapters/         Codex, Claude, Copilot, Mock
   │   └── registry.ts       Session registry → .floe/state/sessions.json
-  ├── SKILL.md              Universal skill behavioural rules
+  ├── SKILL.md              Skill entrypoint
   └── package.json          Dependencies (zod + optional provider SDKs)
 
 floe-mem (optional, separate)
   └── Retrieval-augmented memory for context continuity across sessions
 ```
+
+Repository source-of-truth boundaries are defined in [docs/repo-layout-contract.md](docs/repo-layout-contract.md).
 
 ### Three layers
 
@@ -60,10 +63,11 @@ bunx github:floe-ai/floe-core
 ```
 
 This single command:
-- Copies the `.floe/` framework directory (scripts, schemas, roles, runtime, CLI)
-- Installs thin skill pointers for each provider
-- Copies agent wrapper files to provider-specific directories
+- Copies the `.floe/` framework directory (scripts, schemas, roles, skills, runtime, CLI)
+- Installs thin skill pointers for each provider (`floe-exec`, `sizing-heuristics`)
+- Generates provider foreman wrapper files
 - Scaffolds `delivery/` and `docs/` directories
+- Creates `.floe/dod.json` when missing
 - Installs dependencies
 
 Add `--validate` to run consistency checks after install. Use `--no-scaffold` to skip directory creation. Use `--target codex,claude` to install for specific providers only. Use `--force` to overwrite existing installations.
@@ -127,7 +131,7 @@ bun run .floe/bin/floe.ts manage-feature-pair --feature <id>
 
 ## Optional: floe-mem integration
 
-If [`floe-mem`](https://github.com/floe-ai/floe-mem) (context-memory skill) is installed in the project, `floe-exec` will automatically register summaries with memory after creation.
+`floe-core` does not install `context-memory`. If an external [`floe-mem`](https://github.com/floe-ai/floe-mem) / `context-memory` skill is already installed in the project environment, `floe-exec` will automatically register summaries with memory after creation.
 
 ---
 
@@ -140,12 +144,13 @@ your-project/
 │   ├── scripts/             deterministic Bun scripts
 │   ├── schemas/             JSON schemas for artefacts
 │   ├── roles/               canonical role definitions
+│   ├── skills/              canonical skill definitions
 │   ├── runtime/             provider adapters + session registry
-│   ├── memory/              context-memory scripts (from floe-mem)
+│   ├── dod.json             project Definition of Done
 │   ├── state/
 │   │   ├── current.json     active pointers only (gitignored)
 │   │   └── sessions.json    worker session registry (gitignored)
-│   ├── SKILL.md             full skill definition
+│   ├── SKILL.md             skill entrypoint
 │   └── package.json         dependencies
 ├── delivery/
 │   ├── releases/            release artefacts
@@ -159,12 +164,15 @@ your-project/
 │   ├── architecture/        architecture documents
 │   └── decisions/           ADRs
 ├── .github/
-│   ├── skills/floe-exec/SKILL.md   thin pointer → .floe/SKILL.md
+│   ├── skills/floe-exec/SKILL.md          thin pointer → .floe/skills/floe-exec/SKILL.md
+│   ├── skills/sizing-heuristics/SKILL.md  thin pointer → .floe/skills/sizing-heuristics/SKILL.md
 │   └── agents/foreman.agent.md
 ├── .claude/
-│   ├── skills/floe-exec/SKILL.md   thin pointer → .floe/SKILL.md
+│   ├── skills/floe-exec/SKILL.md          thin pointer → .floe/skills/floe-exec/SKILL.md
+│   ├── skills/sizing-heuristics/SKILL.md  thin pointer → .floe/skills/sizing-heuristics/SKILL.md
 │   └── agents/foreman.md
 ├── .agents/
-│   └── skills/floe-exec/SKILL.md   thin pointer → .floe/SKILL.md
+│   ├── skills/floe-exec/SKILL.md          thin pointer → .floe/skills/floe-exec/SKILL.md
+│   └── skills/sizing-heuristics/SKILL.md  thin pointer → .floe/skills/sizing-heuristics/SKILL.md
 └── AGENTS.md                        Codex foreman agent definition
 ```

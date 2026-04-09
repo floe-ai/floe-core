@@ -34,7 +34,7 @@ This step is mandatory. Do not skip it.
 ## Implementation Loop
 
 1. **Load context**: Read the feature artefact, related summaries, and prior review findings
-2. **Check floe-mem**: If available, `bun run .floe/scripts/memory.ts recall "<feature title>"` for related context
+2. **Check external context-memory (optional)**: If a `context-memory` skill is installed in your environment, run its `recall` workflow for related context
 3. **Implement**: Make the changes required by the feature
 4. **Verify locally**: Run the smallest relevant verification first (unit tests, type check), then broader tests
 5. **Summarise**: Write a run summary

@@ -8,7 +8,7 @@
  *   bun run scripts/validate.ts state        # validate runtime state consistency
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   paths, readJson, listArtefacts, validateArtefact, findArtefact,
@@ -25,11 +25,131 @@ interface Issue {
   message: string;
 }
 
+const REQUIRED_CANONICAL_FILES = [
+  ".floe/SKILL.md",
+  ".floe/roles/foreman.md",
+  ".floe/roles/planner.md",
+  ".floe/roles/implementer.md",
+  ".floe/roles/reviewer.md",
+  ".floe/skills/floe-exec/SKILL.md",
+  ".floe/skills/sizing-heuristics/SKILL.md",
+  ".floe/schemas/dod.json",
+] as const;
+
+const REQUIRED_PROVIDER_SKILLS = ["floe-exec", "sizing-heuristics"] as const;
+
+interface ProviderLayout {
+  name: string;
+  wrapperPath: string;
+  skillsRoot: string;
+}
+
+function collectProviderLayouts(): ProviderLayout[] {
+  return [
+    {
+      name: "codex",
+      wrapperPath: join(p.root, "AGENTS.md"),
+      skillsRoot: join(p.root, ".agents", "skills"),
+    },
+    {
+      name: "copilot",
+      wrapperPath: join(p.root, ".github", "agents", "foreman.agent.md"),
+      skillsRoot: join(p.root, ".github", "skills"),
+    },
+    {
+      name: "claude",
+      wrapperPath: join(p.root, ".claude", "agents", "foreman.md"),
+      skillsRoot: join(p.root, ".claude", "skills"),
+    },
+  ];
+}
+
+function validateFrameworkContract(issues: Issue[]): void {
+  for (const relPath of REQUIRED_CANONICAL_FILES) {
+    if (!existsSync(join(p.root, relPath))) {
+      issues.push({
+        severity: "error",
+        type: "framework",
+        message: `Missing canonical file: ${relPath}`,
+      });
+    }
+  }
+
+  const dodPath = join(p.floe, "dod.json");
+  if (!existsSync(dodPath)) {
+    issues.push({
+      severity: "error",
+      type: "framework",
+      message: "Missing project Definition of Done: .floe/dod.json",
+    });
+  } else {
+    try {
+      const dod = readJson(dodPath);
+      const result = validateArtefact(dod, "dod");
+      if (!result.valid) {
+        for (const err of result.errors) {
+          issues.push({
+            severity: "error",
+            type: "framework",
+            message: `.floe/dod.json invalid: ${err}`,
+          });
+        }
+      }
+    } catch {
+      issues.push({
+        severity: "error",
+        type: "framework",
+        message: "Unable to parse .floe/dod.json",
+      });
+    }
+  }
+
+  for (const provider of collectProviderLayouts()) {
+    const providerInstalled =
+      existsSync(provider.wrapperPath)
+      || REQUIRED_PROVIDER_SKILLS.some((skill) => existsSync(join(provider.skillsRoot, skill, "SKILL.md")));
+    if (!providerInstalled) continue;
+
+    for (const skill of REQUIRED_PROVIDER_SKILLS) {
+      const pointerPath = join(provider.skillsRoot, skill, "SKILL.md");
+      if (!existsSync(pointerPath)) {
+        issues.push({
+          severity: "error",
+          type: "framework",
+          message: `Missing ${provider.name} skill pointer: ${pointerPath.replace(p.root + "/", "")}`,
+        });
+        continue;
+      }
+
+      const expectedRef = `.floe/skills/${skill}/SKILL.md`;
+      let content = "";
+      try {
+        content = readFileSync(pointerPath, "utf-8");
+      } catch {
+        issues.push({
+          severity: "error",
+          type: "framework",
+          message: `Unable to read ${provider.name} skill pointer: ${pointerPath.replace(p.root + "/", "")}`,
+        });
+        continue;
+      }
+      if (!content.includes(expectedRef)) {
+        issues.push({
+          severity: "error",
+          type: "framework",
+          message: `${provider.name} skill pointer does not reference canonical file: ${pointerPath.replace(p.root + "/", "")} -> ${expectedRef}`,
+        });
+      }
+    }
+  }
+}
+
 function validateAll(): Issue[] {
   const issues: Issue[] = [];
 
   // Check directory structure exists
   const requiredDirs = [
+    p.floe,
     p.releases, p.epics, p.features, p.reviews, p.summaries, p.notes,
     p.state,
   ];
@@ -38,6 +158,8 @@ function validateAll(): Issue[] {
       issues.push({ severity: "error", type: "structure", message: `Missing directory: ${dir.replace(p.root + "/", "")}` });
     }
   }
+
+  validateFrameworkContract(issues);
 
   // Validate all artefacts against schemas
   const types = [

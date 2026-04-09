@@ -57,7 +57,6 @@ if (!existsSync(floeGitignore)) {
     [
       "# Runtime state — not committed",
       "state/",
-      "memory/*.db*",
       "",
     ].join("\n"),
     "utf-8"

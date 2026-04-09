@@ -42,7 +42,6 @@ export function paths(root?: string) {
     decisions: join(projectRoot, "docs", "decisions"),
     floe: join(projectRoot, ".floe"),
     state: join(projectRoot, ".floe", "state"),
-    memory: join(projectRoot, ".floe", "memory"),
     schemas: join(dirname(import.meta.dir), "schemas"),
   };
 }
