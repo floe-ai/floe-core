@@ -26,7 +26,6 @@ interface Issue {
 }
 
 const REQUIRED_CANONICAL_FILES = [
-  ".floe/SKILL.md",
   ".floe/roles/foreman.md",
   ".floe/roles/planner.md",
   ".floe/roles/implementer.md",

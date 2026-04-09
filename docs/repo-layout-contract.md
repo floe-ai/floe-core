@@ -9,7 +9,6 @@ Everything under `floe/` is installable product payload.
 - `floe/roles/` is the canonical role source.
 - `floe/skills/` is the canonical skill source.
 - `floe/schemas/`, `floe/scripts/`, `floe/runtime/`, and `floe/bin/` are canonical runtime/tooling sources.
-- `floe/SKILL.md` is an entrypoint that routes to canonical skill docs under `floe/skills/`.
 
 Installer rule: `.floe/` in consumer repos must be derived from this tree.
 

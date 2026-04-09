@@ -135,8 +135,8 @@ function installFloeDir(projectRoot: string, force: boolean): void {
     }
   }
 
-  // Copy package.json and SKILL.md
-  for (const file of ["package.json", "SKILL.md"]) {
+  // Copy top-level files from canonical payload
+  for (const file of ["package.json"]) {
     const src = join(source, file);
     if (existsSync(src)) {
       cpSync(src, join(dest, file));

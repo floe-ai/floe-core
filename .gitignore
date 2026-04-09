@@ -1,9 +1,3 @@
-# Runtime state — not committed
-.floe/state/
-.floe/memory/*.db
-.floe/memory/*.db-*
-.floe/node_modules/
-
 # Node
 node_modules/
 

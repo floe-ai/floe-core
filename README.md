@@ -20,7 +20,6 @@ Works with **Codex**, **Copilot CLI**, and **Claude Code** as the foreman (user-
   ├── runtime/              Provider adapters + session registry
   │   ├── adapters/         Codex, Claude, Copilot, Mock
   │   └── registry.ts       Session registry → .floe/state/sessions.json
-  ├── SKILL.md              Skill entrypoint
   └── package.json          Dependencies (zod + optional provider SDKs)
 
 floe-mem (optional, separate)
@@ -150,7 +149,6 @@ your-project/
 │   ├── state/
 │   │   ├── current.json     active pointers only (gitignored)
 │   │   └── sessions.json    worker session registry (gitignored)
-│   ├── SKILL.md             skill entrypoint
 │   └── package.json         dependencies
 ├── delivery/
 │   ├── releases/            release artefacts
