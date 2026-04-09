@@ -234,7 +234,7 @@ function daemonEndpointFromArgs(args: Record<string, any>): string | undefined {
 
 async function isDaemonReachable(endpoint: string): Promise<boolean> {
   try {
-    const response = await sendDaemonRequest(endpoint, "runtime.status", {}, { timeoutMs: 300 });
+    const response = await sendDaemonRequest(endpoint, "runtime.status", {});
     return response.ok;
   } catch {
     return false;
@@ -395,49 +395,14 @@ function parsePositiveMs(raw: unknown): number | null {
   return Math.floor(parsed);
 }
 
-function daemonActionTimeoutMs(
-  action: string,
-  args: Record<string, any>,
-  payload: Record<string, unknown>,
-): number {
-  const explicitTimeout = parsePositiveMs(args.timeout);
-  if (explicitTimeout !== null) return explicitTimeout;
-
-  const defaultTimeoutMs = 15_000;
-  const longRunningTimeoutMs = 30 * 60_000; // 30 minutes
-  const eventsSubscribeMinTimeoutMs = 70_000;
-  const eventsSubscribeBufferMs = 10_000;
-
-  const waitMs = Math.max(
-    0,
-    Number(payload.waitMs ?? args["wait-ms"] ?? 0) || 0,
-  );
-
-  if (action === "events.subscribe") {
-    return Math.max(eventsSubscribeMinTimeoutMs, waitMs + eventsSubscribeBufferMs);
-  }
-
-  const longRunningActions = new Set([
-    "route.send",
-    "route.reply",
-    "worker.continue",
-    "call.resolve",
-  ]);
-
-  if (longRunningActions.has(action)) return longRunningTimeoutMs;
-  if (action === "worker.start" && typeof payload.initialMessage === "string" && payload.initialMessage.trim()) {
-    return longRunningTimeoutMs;
-  }
-
-  return defaultTimeoutMs;
-}
-
 async function callDaemonAction(action: string, args: Record<string, any>): Promise<Record<string, unknown>> {
   const explicitEndpoint = daemonEndpointFromArgs(args);
+  const explicitTimeoutMs = parsePositiveMs(args.timeout);
+  const requestOptions = explicitTimeoutMs !== null ? { timeoutMs: explicitTimeoutMs } : undefined;
 
   if (action === "runtime.ensure") {
     const endpoint = await ensureDaemonRunning(args);
-    const status = await sendDaemonRequest(endpoint, "runtime.status", {}, { timeoutMs: 2000 });
+    const status = await sendDaemonRequest(endpoint, "runtime.status", {}, requestOptions);
     if (!status.ok) return { ok: false, error: status.error ?? "Daemon status failed" };
     return { ok: true, action, endpoint, ...(status.result ?? {}) };
   }
@@ -454,19 +419,18 @@ async function callDaemonAction(action: string, args: Record<string, any>): Prom
     if (!reachable) {
       return { ok: true, action, endpoint: explicitEndpoint ?? null, stopped: true, alreadyStopped: true };
     }
-    const shutdown = await sendDaemonRequest(reachable, action, {}, { timeoutMs: 5000 });
+    const shutdown = await sendDaemonRequest(reachable, action, {}, requestOptions);
     if (!shutdown.ok) return { ok: false, error: shutdown.error ?? "Daemon shutdown failed" };
     return { ok: true, action, endpoint: reachable, ...(shutdown.result ?? {}) };
   }
 
   const endpoint = await ensureDaemonRunning(args);
   const payload = buildDaemonPayload(action, args);
-  const timeoutMs = daemonActionTimeoutMs(action, args, payload);
   const response = await sendDaemonRequest(
     endpoint,
     action,
     payload,
-    { timeoutMs },
+    requestOptions,
   );
 
   if (!response.ok) {

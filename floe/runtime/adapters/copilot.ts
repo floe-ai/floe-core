@@ -21,9 +21,9 @@
  *   - Completion: session.idle fires when the response is ready.
  *   - session.on() returns an unsubscribe function — there is no .off() method.
  *
- * Non-streaming convenience:
- *   - sendAndWait({ prompt }) returns a promise that resolves with the full response.
- *   - Used in sendMessage() for cleaner non-streaming path.
+ * Non-streaming runtime behavior:
+ *   - The adapter intentionally uses send() + session.idle (no SDK timeout path)
+ *     so daemon-managed calls can run indefinitely until completion.
  */
 
 import type { ProviderAdapter } from "./interface.ts";
@@ -39,10 +39,6 @@ import type {
 // ── SDK type shapes (sourced from @github/copilot-sdk v0.1.x) ───────────────
 
 type SessionEventHandler = (event: unknown) => void;
-
-interface CopilotSendAndWaitResult {
-  data: { content: string };
-}
 
 interface CopilotPermissionResult {
   kind: string;
@@ -61,8 +57,6 @@ interface CopilotSession {
   readonly workspacePath?: string;
   /** Send a prompt. Resolves when dispatch is complete; subscribe to events for the response. */
   send(options: { prompt: string }): Promise<void>;
-  /** Send a prompt and wait for the complete response. */
-  sendAndWait(options: { prompt: string }, timeout?: number): Promise<CopilotSendAndWaitResult | null>;
   /** Subscribe to all events or a specific event type. Returns an unsubscribe function. */
   on(handler: SessionEventHandler): () => void;
   on(eventType: string, handler: SessionEventHandler): () => void;
@@ -123,23 +117,63 @@ export class CopilotAdapter implements ProviderAdapter {
     }
   }
 
-  private resolveSendTimeoutMs(requested?: number): number {
-    if (Number.isFinite(requested) && (requested as number) >= 100) {
-      return Math.floor(requested as number);
-    }
-    const envValue = Number(process.env.FLOE_COPILOT_SEND_TIMEOUT_MS ?? "");
-    if (Number.isFinite(envValue) && envValue >= 100) {
-      return Math.floor(envValue);
-    }
-    return 30 * 60_000;
-  }
-
   private generateId(): string {
     return `copilot-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   }
 
   private now(): string {
     return new Date().toISOString();
+  }
+
+  private async sendPromptUntilIdle(
+    session: CopilotSession,
+    prompt: string,
+    onDelta?: (delta: string) => void,
+  ): Promise<string> {
+    return new Promise((resolve, reject) => {
+      let deltaContent = "";
+      let assistantMessageContent = "";
+      let unsubscribe: (() => void) | null = null;
+
+      const complete = (result: string) => {
+        if (unsubscribe) {
+          unsubscribe();
+          unsubscribe = null;
+        }
+        resolve(result);
+      };
+
+      const fail = (err: unknown) => {
+        if (unsubscribe) {
+          unsubscribe();
+          unsubscribe = null;
+        }
+        reject(err);
+      };
+
+      unsubscribe = session.on((event: unknown) => {
+        const e = event as { type?: string; data?: { deltaContent?: string; content?: string; message?: string } };
+        if (e?.type === "assistant.message_delta" && typeof e.data?.deltaContent === "string") {
+          deltaContent += e.data.deltaContent;
+          onDelta?.(e.data.deltaContent);
+          return;
+        }
+        if (e?.type === "assistant.message") {
+          const content = e.data?.content;
+          if (typeof content === "string") assistantMessageContent = content;
+          return;
+        }
+        if (e?.type === "session.error") {
+          fail(new Error(e.data?.message ?? "Copilot session error"));
+          return;
+        }
+        if (e?.type === "session.idle") {
+          complete(assistantMessageContent || deltaContent);
+        }
+      });
+
+      session.send({ prompt }).catch((err: unknown) => fail(err));
+    });
   }
 
   hasSession(sessionId: string): boolean {
@@ -232,9 +266,10 @@ export class CopilotAdapter implements ProviderAdapter {
       (storedSession.metadata?.roleContent as string | undefined);
 
     if (roleContent) {
-      await copilotSession.sendAndWait({
-        prompt: `[System context — resumed session. Your role definition follows.]\n\n${roleContent}\n\nReply with only: "Ready."`,
-      }, this.resolveSendTimeoutMs()).catch(() => {
+      await this.sendPromptUntilIdle(
+        copilotSession,
+        `[System context — resumed session. Your role definition follows.]\n\n${roleContent}\n\nReply with only: "Ready."`,
+      ).catch(() => {
         // Best-effort: if re-injection fails, the session still works
       });
     }
@@ -258,17 +293,12 @@ export class CopilotAdapter implements ProviderAdapter {
   async sendMessage(
     sessionId: string,
     message: string,
-    options?: SendOptions
+    _options?: SendOptions
   ): Promise<MessageResult> {
     const meta = this.sessions.get(sessionId);
     if (!meta) throw new Error(`Copilot session not found: ${sessionId}`);
 
-    // Use sendAndWait() for non-streaming — cleaner than manual event subscription
-    const response = await meta.copilotSession.sendAndWait(
-      { prompt: message },
-      this.resolveSendTimeoutMs(options?.timeoutMs),
-    );
-    const content = response?.data?.content ?? "";
+    const content = await this.sendPromptUntilIdle(meta.copilotSession, message);
 
     meta.session.lastMessageAt = this.now();
     meta.session.updatedAt = this.now();
@@ -284,36 +314,28 @@ export class CopilotAdapter implements ProviderAdapter {
     const meta = this.sessions.get(sessionId);
     if (!meta) throw new Error(`Copilot session not found: ${sessionId}`);
 
-    return new Promise((resolve, reject) => {
-      let fullContent = "";
-      let unsubscribe: (() => void) | null = null;
-
-      unsubscribe = meta.copilotSession.on((event: unknown) => {
-        const e = event as { type?: string; data?: { deltaContent?: string; content?: string } };
-        if (e?.type === "assistant.message_delta" && e?.data?.deltaContent) {
-          fullContent += e.data.deltaContent;
-          handlers.onDelta?.(e.data.deltaContent, {
+    try {
+      const fullContent = await this.sendPromptUntilIdle(
+        meta.copilotSession,
+        message,
+        (delta) => {
+          handlers.onDelta?.(delta, {
             type: "message_delta",
             sessionId,
-            data: e.data.deltaContent,
+            data: delta,
           });
-        } else if (e?.type === "session.idle") {
-          if (unsubscribe) unsubscribe();
-          meta.session.lastMessageAt = this.now();
-          meta.session.updatedAt = this.now();
+        },
+      );
 
-          const result: MessageResult = { sessionId, content: fullContent, finishReason: "stop" };
-          handlers.onComplete?.(result, { type: "message_complete", sessionId, data: result });
-          resolve();
-        }
-      });
+      meta.session.lastMessageAt = this.now();
+      meta.session.updatedAt = this.now();
 
-      meta.copilotSession.send({ prompt: message }).catch((err: unknown) => {
-        if (unsubscribe) unsubscribe();
-        handlers.onError?.(String(err), { type: "error", sessionId, error: String(err) });
-        reject(err);
-      });
-    });
+      const result: MessageResult = { sessionId, content: fullContent, finishReason: "stop" };
+      handlers.onComplete?.(result, { type: "message_complete", sessionId, data: result });
+    } catch (err: unknown) {
+      handlers.onError?.(String(err), { type: "error", sessionId, error: String(err) });
+      throw err;
+    }
   }
 
   getSession(sessionId: string): WorkerSession | undefined {

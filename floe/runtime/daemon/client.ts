@@ -5,39 +5,16 @@ export interface DaemonClientOptions {
   timeoutMs?: number;
 }
 
-function daemonActionDefaultTimeoutMs(action: string, payload?: Record<string, unknown>): number {
-  const defaultTimeoutMs = 30_000;
-  const longRunningTimeoutMs = 30 * 60_000; // 30 minutes
-  const eventsSubscribeMinTimeoutMs = 70_000;
-  const eventsSubscribeBufferMs = 10_000;
-
-  const waitMs = Number(payload?.waitMs ?? 0);
-  if (action === "events.subscribe") {
-    const requestedWaitMs = Number.isFinite(waitMs) && waitMs > 0 ? waitMs : 0;
-    return Math.max(eventsSubscribeMinTimeoutMs, requestedWaitMs + eventsSubscribeBufferMs);
-  }
-
-  const longRunningActions = new Set([
-    "route.send",
-    "route.reply",
-    "worker.continue",
-    "call.resolve",
-  ]);
-  if (longRunningActions.has(action)) return longRunningTimeoutMs;
-  if (action === "worker.start" && typeof payload?.initialMessage === "string" && payload.initialMessage.trim()) {
-    return longRunningTimeoutMs;
-  }
-
-  return defaultTimeoutMs;
-}
-
 export async function sendDaemonRequest(
   endpoint: string,
   action: string,
   payload?: Record<string, unknown>,
   options?: DaemonClientOptions,
 ): Promise<DaemonResponse> {
-  const timeoutMs = Math.max(100, options?.timeoutMs ?? daemonActionDefaultTimeoutMs(action, payload));
+  const requestedTimeoutMs = Number(options?.timeoutMs);
+  const timeoutMs = Number.isFinite(requestedTimeoutMs) && requestedTimeoutMs >= 100
+    ? Math.floor(requestedTimeoutMs)
+    : null;
 
   const request: DaemonRequest = {
     id: `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
@@ -59,18 +36,22 @@ export async function sendDaemonRequest(
     let done = false;
     let buffer = "";
 
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
     const finish = (fn: () => void) => {
       if (done) return;
       done = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       socket.removeAllListeners();
       try { socket.end(); } catch {}
       fn();
     };
 
-    const timer = setTimeout(() => {
-      finish(() => reject(new Error(`Timed out waiting for daemon response after ${timeoutMs}ms`)));
-    }, timeoutMs);
+    if (timeoutMs !== null) {
+      timer = setTimeout(() => {
+        finish(() => reject(new Error(`Timed out waiting for daemon response after ${timeoutMs}ms`)));
+      }, timeoutMs);
+    }
 
     socket.on("connect", () => {
       socket.write(JSON.stringify(request) + "\n");
