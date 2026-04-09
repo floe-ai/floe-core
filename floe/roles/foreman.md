@@ -133,12 +133,14 @@ Do not skip this step. It is mandatory.
 ## Stop Conditions
 
 STOP and return to the user when:
-- Feature or epic completes (respect continuation preference from `state.ts get`)
+- Feature or epic **execution cycle** completes (respect `continuationPreference` from `state.ts get`)
 - Repeated failure (2 failed loops → recommend pair replacement; 3 → mandatory replan)
 - Scope change, UX tradeoff, or architecture decision needed
 - Security/privacy/destructive concern triggered
 - Intake confidence too low
 - Reviewer escalates approach misalignment before coding begins
+
+**`continuationPreference` applies only at execution boundaries** (after a feature execution cycle finishes). It does NOT apply to plan-mode transitions. Planning steps — release→epic decomposition, epic→feature decomposition — chain autonomously without stopping for user confirmation. Only stop for planning if an error occurs or a decision is required.
 
 ---
 
@@ -214,9 +216,11 @@ bun run .floe/bin/floe.ts check-alignment --feature <id>
 # Configuration
 bun run .floe/bin/floe.ts configure                                     # discovery — returns available providers + models as JSON
 bun run .floe/bin/floe.ts configure --default-provider copilot --model claude-sonnet-4  # write config directly
+bun run .floe/bin/floe.ts configure --default-provider copilot --src-root src           # set source root
 bun run .floe/bin/floe.ts show-config                                   # show current config
 bun run .floe/bin/floe.ts list-models --provider <name>                 # list available models
 bun run .floe/bin/floe.ts update-config --role <role|all> --model <id> [--thinking <level>]
+bun run .floe/bin/floe.ts update-config --src-root src                  # set source root after initial configure
 ```
 
 When launching a Planner, always provide `--scope` (release or epic) and `--target` (the ID). The Planner will decompose only that level.
@@ -292,23 +296,20 @@ bun run .floe/scripts/artefact.ts list epic
 ### Expected Flow: Execute Mode
 
 ```bash
-# 1. Launch implementer + reviewer pair
+# 1. Launch implementer + reviewer pair — autonomous runner starts in background
 bun run .floe/bin/floe.ts manage-feature-pair --feature feat-001
+# Returns: { ok: true, runId, runnerStarted: true, implementer: {...}, reviewer: {...} }
 
-# 2. Message implementer to propose approach (async)
-bun run .floe/bin/floe.ts message-worker --session <impl-id> \
-  --message "Read the feature and propose your execution approach..." --async
+# 2. Poll until terminal (complete or escalated)
+bun run .floe/bin/floe.ts feature-run-status --feature feat-001
+# Returns phase, round, lastAction, outcome
 
-# 3. Poll for implementer's approach proposal
-bun run .floe/bin/floe.ts get-worker-result --session <impl-id>
-
-# 4. Message reviewer to evaluate approach
-bun run .floe/bin/floe.ts message-worker --session <rev-id> \
-  --message "Evaluate the implementer's approach proposal..." --async
-
-# 5. Poll for reviewer's verdict
-bun run .floe/bin/floe.ts get-worker-result --session <rev-id>
+# 3. React only to terminal states
+# phase: "complete"   → proceed to next feature
+# phase: "escalated"  → read escalationReason, surface to user, resolve before continuing
 ```
+
+The feature runner drives the full alignment → implementation → review loop automatically. You do NOT need to message workers manually. Only intervene after escalation.
 
 ---
 

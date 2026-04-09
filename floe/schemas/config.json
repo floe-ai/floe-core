@@ -26,6 +26,10 @@
       "default": false,
       "description": "Whether interactive configuration has been completed. Set to true after the configure command runs. Existing configs without this field are treated as configured."
     },
+    "srcRoot": {
+      "type": "string",
+      "description": "Path to the project's application source root, relative to the project root (e.g. 'src'). Injected into implementer worker context so generated code lands in the right place. Omit if the project root is also the source root."
+    },
     "roles": {
       "type": "object",
       "description": "Per-role provider overrides. Omit a role to use defaultProvider.",
@@ -39,6 +43,7 @@
   },
   "additionalProperties": false,
   "$defs": {
+
     "roleConfig": {
       "type": "object",
       "properties": {

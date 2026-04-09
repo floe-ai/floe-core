@@ -69,6 +69,7 @@ interface FloeConfig {
   defaultProvider: string;
   enabledProviders?: string[];
   configured?: boolean;
+  srcRoot?: string;
   roles?: {
     planner?: { provider?: string; model?: string; thinking?: string };
     implementer?: { provider?: string; model?: string; thinking?: string };
@@ -84,6 +85,15 @@ function loadConfig(projectRoot: string): FloeConfig | null {
   } catch {
     return null;
   }
+}
+
+function srcRootContextAddendum(srcRoot: string): string {
+  return [
+    "## Source Root",
+    `All application source code for this project lives at: \`${srcRoot}/\` (relative to the project root).`,
+    "Write every generated or modified file under this directory.",
+    "Never write into \`.floe/\`, framework tooling, or any other directory outside this path.",
+  ].join("\n");
 }
 
 function resolveProvider(role: string, args: Record<string, any>, config: FloeConfig | null): {
@@ -339,6 +349,7 @@ function buildDaemonPayload(action: string, args: Record<string, any>): Record<s
   if (args.cursor !== undefined && payload.cursor === undefined) payload.cursor = Number(args.cursor);
   if (args.limit !== undefined && payload.limit === undefined) payload.limit = Number(args.limit);
   if (args["wait-ms"] !== undefined && payload.waitMs === undefined) payload.waitMs = Number(args["wait-ms"]);
+  if (args.contextAddendum !== undefined && payload.contextAddendum === undefined) payload.contextAddendum = args.contextAddendum;
 
   if (args.participants !== undefined && payload.participants === undefined) {
     payload.participants = String(args.participants).split(",").map((part) => part.trim()).filter(Boolean);
@@ -461,6 +472,15 @@ async function launchWorker(args: Record<string, any>) {
     };
   }
 
+  // Pre-flight: config must be set up before any worker can launch
+  const config = loadConfig(projectRoot);
+  if (config?.configured === false) {
+    return { ok: false, error: "Provider not configured. Run: bun run .floe/bin/floe.ts configure" };
+  }
+  if (!config?.enabledProviders) {
+    return { ok: false, error: "enabledProviders not set in .floe/config.json. Run: bun run .floe/bin/floe.ts configure" };
+  }
+
   // Planner scope validation
   if (role === "planner") {
     const scope = args.scope;
@@ -486,7 +506,13 @@ async function launchWorker(args: Record<string, any>) {
     return { ok: false, error: `Feature artefact not found: ${args.feature}. Create the feature via the Planner first.` };
   }
 
-  const runtimeResult = await callDaemonAction("worker.start", args);
+  // Inject srcRoot context for implementer sessions
+  const workerArgs = { ...args };
+  if (role === "implementer" && !workerArgs.contextAddendum && config?.srcRoot) {
+    workerArgs.contextAddendum = srcRootContextAddendum(config.srcRoot);
+  }
+
+  const runtimeResult = await callDaemonAction("worker.start", workerArgs);
   if (!runtimeResult.ok) return runtimeResult;
 
   const session = (runtimeResult as any).session as Record<string, any> | undefined;
@@ -652,7 +678,10 @@ async function manageFeaturePair(args: Record<string, any>) {
 
   const config = loadConfig(projectRoot);
 
-  // Pre-flight: enabledProviders must be set
+  // Pre-flight: config must be set up
+  if (config?.configured === false) {
+    return { ok: false, error: "Provider not configured. Run: bun run .floe/bin/floe.ts configure" };
+  }
   if (!config?.enabledProviders) {
     return { ok: false, error: "Provider allowlist not set. Run: bun run .floe/bin/floe.ts configure" };
   }
@@ -685,6 +714,9 @@ async function manageFeaturePair(args: Record<string, any>) {
   const runId = (runStart as any).run?.runId as string | undefined;
   if (!runId) return { ok: false, error: "Daemon did not return runId from run.start" };
 
+  // Build implementer context: inject srcRoot if configured
+  const implAddendum = config?.srcRoot ? srcRootContextAddendum(config.srcRoot) : undefined;
+
   const implementer = await callDaemonAction("worker.start", {
     ...args,
     run: runId,
@@ -693,6 +725,7 @@ async function manageFeaturePair(args: Record<string, any>) {
     feature: args.feature,
     epic: args.epic,
     release: args.release,
+    ...(implAddendum ? { contextAddendum: implAddendum } : {}),
   });
   if (!implementer.ok) {
     await callDaemonAction("run.escalate", { ...args, run: runId, reason: `Implementer launch failed: ${(implementer as any).error ?? "unknown error"}` });
@@ -713,13 +746,50 @@ async function manageFeaturePair(args: Record<string, any>) {
     return { ok: false, error: `Reviewer launch failed: ${(reviewer as any).error ?? "unknown error"}`, runId };
   }
 
+  const implWorkerId = (implementer as any).workerId as string;
+  const revWorkerId = (reviewer as any).workerId as string;
+
+  // Write initial feature-run state synchronously so feature-run-status works immediately
+  const stateDir = join(projectRoot, ".floe", "state", "feature-runs");
+  const stateFile = join(stateDir, `${args.feature}.json`);
+  if (!existsSync(stateFile)) {
+    mkdirSync(stateDir, { recursive: true });
+    const now = new Date().toISOString();
+    const initState = {
+      featureId: args.feature,
+      implSessionId: implWorkerId,
+      revSessionId: revWorkerId,
+      phase: "alignment",
+      round: 0,
+      maxRounds: 3,
+      lastAction: "",
+      startedAt: now,
+      updatedAt: now,
+      outcome: null,
+    };
+    writeFileSync(stateFile, JSON.stringify(initState, null, 2) + "\n", "utf-8");
+  }
+
+  // Spawn feature runner in background to drive the alignment → implementation → review loop
+  const runnerScript = join(dirname(import.meta.dir), "scripts", "feature-runner.ts");
+  const runnerProc = Bun.spawn(
+    ["bun", "run", runnerScript, "run",
+      "--feature", args.feature,
+      "--impl-session", implWorkerId,
+      "--rev-session", revWorkerId,
+    ],
+    { cwd: projectRoot, stdio: ["ignore", "ignore", "ignore"] },
+  );
+  runnerProc.unref();
+
   return {
     ok: true,
     featureId: args.feature,
     runId,
     runtimeManaged: true,
-    implementer: { sessionId: (implementer as any).workerId, provider: implResolved.provider },
-    reviewer: { sessionId: (reviewer as any).workerId, provider: revResolved.provider },
+    runnerStarted: true,
+    implementer: { sessionId: implWorkerId, provider: implResolved.provider },
+    reviewer: { sessionId: revWorkerId, provider: revResolved.provider },
   };
 }
 
@@ -940,6 +1010,7 @@ async function configureCommand(args: Record<string, any>) {
     }
 
     const config: FloeConfig = { defaultProvider, enabledProviders, configured: true };
+    if (args["src-root"]) config.srcRoot = args["src-root"] as string;
     if (args.model || args.thinking) {
       config.roles = {};
       for (const role of ["planner", "implementer", "reviewer"] as const) {
@@ -989,6 +1060,7 @@ async function showConfig(_args: Record<string, any>) {
     ok: true,
     config,
     enabledProviders: config.enabledProviders ?? "NOT SET (run configure)",
+    srcRoot: config.srcRoot ?? null,
   };
 }
 
@@ -1040,8 +1112,8 @@ async function updateConfig(args: Record<string, any>) {
   const model = args.model as string | undefined;
   const thinking = args.thinking as string | undefined;
 
-  if (!provider && !model && !thinking && !args["default-provider"]) {
-    return { ok: false, error: "update-config requires at least one of: --default-provider, --provider, --model, --thinking" };
+  if (!provider && !model && !thinking && !args["default-provider"] && !args["src-root"]) {
+    return { ok: false, error: "update-config requires at least one of: --default-provider, --src-root, --provider, --model, --thinking" };
   }
 
   // Validate provider if given
@@ -1061,6 +1133,11 @@ async function updateConfig(args: Record<string, any>) {
       return { ok: false, error: `Invalid default provider: ${args["default-provider"]}` };
     }
     config.defaultProvider = args["default-provider"];
+  }
+
+  // Update srcRoot
+  if (args["src-root"] !== undefined) {
+    config.srcRoot = (args["src-root"] as string) || undefined;
   }
 
   // Determine which roles to update
@@ -1135,8 +1212,9 @@ const { values: opts } = parseArgs({
     cursor: { type: "string" },
     limit: { type: "string" },
     "wait-ms": { type: "string" },
-    to: { type: "string" },
+    "to": { type: "string" },
     "run-state": { type: "string" },
+    "src-root": { type: "string" },
   },
   strict: false,
 });
