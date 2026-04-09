@@ -770,6 +770,31 @@ async function manageFeaturePair(args: Record<string, any>) {
     writeFileSync(stateFile, JSON.stringify(initState, null, 2) + "\n", "utf-8");
   }
 
+  // Derive and set active release/epic/feature context from the feature artefact chain
+  try {
+    const featureFile = join(projectRoot, "delivery", "features", `${args.feature}.json`);
+    if (existsSync(featureFile)) {
+      const feature = JSON.parse(readFileSync(featureFile, "utf-8"));
+      const epicId = feature.epic_id as string | undefined;
+      const runtimeState = join(projectRoot, ".floe", "state", "current.json");
+      if (existsSync(runtimeState)) {
+        const rs = JSON.parse(readFileSync(runtimeState, "utf-8"));
+        if (epicId) {
+          const epicFile = join(projectRoot, "delivery", "epics", `${epicId}.json`);
+          if (existsSync(epicFile)) {
+            const epic = JSON.parse(readFileSync(epicFile, "utf-8"));
+            const releaseId = epic.release_id as string | undefined;
+            if (releaseId) rs.active_release_id = releaseId;
+          }
+          rs.active_epic_id = epicId;
+        }
+        rs.active_feature_id = args.feature;
+        rs.updated_at = new Date().toISOString();
+        writeFileSync(runtimeState, JSON.stringify(rs, null, 2) + "\n", "utf-8");
+      }
+    }
+  } catch { /* non-fatal — don't block launch if state derivation fails */ }
+
   // Spawn feature runner in background to drive the alignment → implementation → review loop
   const runnerScript = join(dirname(import.meta.dir), "scripts", "feature-runner.ts");
   const runnerProc = Bun.spawn(

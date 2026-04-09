@@ -117,6 +117,30 @@ function getFeatureArtefact(featureId: string): any | null {
   return findArtefact(p.features, featureId);
 }
 
+// ── Epic auto-transition ─────────────────────────────────────────────
+
+/**
+ * After a feature passes review, check if all features in its parent epic
+ * are now completed. If so, mark the epic as completed too.
+ */
+function tryCompleteEpic(featureId: string): void {
+  const feature = getFeatureArtefact(featureId);
+  if (!feature?.epic_id) return;
+
+  const epicId = feature.epic_id as string;
+  const epicFeatures = listArtefacts(p.features).filter((f: any) => f.epic_id === epicId);
+  if (epicFeatures.length === 0) return;
+
+  const allDone = epicFeatures.every((f: any) => f.status === "completed");
+  if (!allDone) return;
+
+  const artefactScript = join(import.meta.dir, "artefact.ts");
+  Bun.spawnSync(
+    ["bun", "run", artefactScript, "update", "epic", epicId, "--data", '{"status":"completed"}'],
+    { cwd: p.root, stdout: "ignore", stderr: "ignore" },
+  );
+}
+
 // ── Phase handlers (each tick does ONE action) ───────────────────────
 
 function tickAlignment(state: FeatureRunState): void {
@@ -658,6 +682,16 @@ switch (cmd) {
       await new Promise((resolve) => setTimeout(resolve, TICK_SLEEP_MS));
       // Re-read state from disk for restart safety
       state = loadState(featureId);
+    }
+
+    // Auto-complete artefact and trigger epic transition on pass
+    if (state.outcome === "pass") {
+      const artefactScript = join(import.meta.dir, "artefact.ts");
+      Bun.spawnSync(
+        ["bun", "run", artefactScript, "update", "feature", state.featureId, "--data", '{"status":"completed"}'],
+        { cwd: p.root, stdout: "ignore", stderr: "ignore" },
+      );
+      tryCompleteEpic(state.featureId);
     }
 
     ok(`Feature run finished`, {

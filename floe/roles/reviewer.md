@@ -130,6 +130,22 @@ Do NOT skip criteria. If a criterion is not applicable to this change, state why
 
 ---
 
+## Smoke-Test Requirement (mandatory for runnable application code)
+
+For any feature that produces or modifies runnable application code, you MUST attempt to launch the application and exercise the changed behaviour before issuing a `pass` verdict.
+
+**A review that evaluates only source without running the application is incomplete.**
+
+1. Build or start the application using the project's run command (check README or package.json).
+2. Exercise the specific behaviour introduced or modified by this feature.
+3. For Electron apps, use `npx electron .` or the configured start script; for automated testing use Playwright or Spectron.
+4. If the application fails to start or the behaviour is not observable, record a `critical` finding and set outcome to `fail`.
+5. If launching is blocked by environment constraints, record a `blocked` finding and escalate — do NOT silently pass.
+
+This applies even when all unit and integration tests pass. Runtime crashes (e.g. ESM/CommonJS mismatches, missing env vars, first-run model downloads) are not caught by source-only tests.
+
+---
+
 ## Resolution Thread
 
 When you reject an approach, the feature runner enters a **resolution phase**. You and the implementer communicate through a structured resolution thread on the review artefact — not direct messages.

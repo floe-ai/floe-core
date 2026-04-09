@@ -117,7 +117,33 @@ bun run .floe/scripts/state.ts set-blocker <class> "<description>"
 
 ---
 
-## Definition of Done Awareness
+## Verify Compiled Output (mandatory when build pipeline is involved)
+
+When the feature touches anything that involves compilation or bundling (TypeScript compilation, Electron main process, webpack/esbuild/vite output, ESM-only dependencies), you MUST verify the **compiled artefact**, not only the source:
+
+1. Run the full build: `npm run build` (or the configured build command).
+2. Launch or exercise the compiled output directly — not the TypeScript source via `ts-node` or `bun run`.
+3. Specifically check for runtime errors that source-level tests cannot catch:
+   - `ERR_REQUIRE_ESM` — CommonJS `require()` of an ESM-only module (common with dynamic `import()` in Electron main process)
+   - Module resolution failures in bundled output
+   - Missing environment variables required at startup
+4. If the build fails or the compiled output crashes, classify as `environment_issue` or `implementation_error`, record it, and resolve before signalling `ready_for_review`.
+
+**Source tests passing is necessary but not sufficient. The compiled artefact must also work.**
+
+---
+
+## Documentation for Application-Producing Features
+
+For features that produce a new runnable application, or significantly change how an existing application is installed or run, you MUST produce or update a `README.md` covering:
+
+1. **Prerequisites** — runtime versions, platform requirements, native dependencies (e.g. `electron-rebuild`)
+2. **Install steps** — exact commands, including any post-install steps
+3. **How to run** — the exact command to start the application
+4. **First-run behaviour** — anything unusual on first launch (model downloads, database initialisation, etc.)
+5. **Platform-specific requirements** — anything that differs on macOS/Linux/Windows
+
+Place the README at the application root. Update it if it already exists. This is a **required** DoD criterion — do not skip it for application-producing features.
 
 When the DoD is injected into your session context, read it BEFORE proposing your execution approach.
 

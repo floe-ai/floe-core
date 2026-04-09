@@ -55,6 +55,7 @@ The release should have:
 
 Each epic should have:
 - A clear title and intent
+- `"status": "active"` (epics are created active so the feature selector can find them immediately)
 - How it contributes to the release
 - Sequencing constraints relative to other epics
 - Acceptance criteria at the epic level
@@ -120,6 +121,7 @@ Always write artefacts using the floe-exec Bun scripts (from the project root):
 bun run .floe/scripts/artefact.ts create epic --data '{
   "title": "...",
   "release_id": "...",
+  "status": "active",
   "intent": "...",
   "acceptance_criteria": ["..."],
   "subsystem_hints": ["..."]
@@ -131,6 +133,7 @@ bun run .floe/scripts/artefact.ts create feature --data '{
   "epic_id": "...",
   "behaviour": "...",
   "acceptance_criteria": ["..."],
+  "dependencies": [],
   "file_hints": ["..."],
   "test_hints": ["..."],
   "architecture_considerations": "..."
@@ -168,7 +171,7 @@ Before finishing decomposition:
 ### Completeness and correctness
 - Every item has a clear title, intent/behaviour, and at least one acceptance criterion
 - Features represent coherent outcomes, not individual implementation steps
-- Dependencies between features are declared (`depends_on` field)
+- Dependencies between features are declared (`dependencies` field — use an array of feature IDs, e.g. `"dependencies": ["feat-abc"]`)
 - No feature silently absorbs adjacent scope
 - Architecture considerations attached where the feature touches shared interfaces
 - You have not created artefacts outside your launched scope

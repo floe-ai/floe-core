@@ -79,6 +79,19 @@ In discover mode, your job is to **capture intent** and **create the release she
 - **Stop** once the next structural action is clear (usually: switch to plan mode and launch the Planner with `--scope intake`)
 - When deeper shaping is needed, launch the Planner with `--scope intake` and the relevant notes. The Planner will refine the release and identify epics.
 
+#### Real-time UX clarification (mandatory for live interaction features)
+
+When the primary differentiating behaviour of a request involves a **real-time user interaction** — live filtering, ambient fading, streaming updates, reactive UI changes as the user types — ask an explicit clarifying question about the interaction model **before** creating the release:
+
+Examples of when this applies:
+- "notes fade as you type" — fade-as-you-type (ambient) vs. search-and-filter (query) are distinct UX paradigms
+- "live results while typing" — debounced search vs. streaming vs. client-side filter have different implementations
+- "real-time updates" — WebSocket push vs. polling vs. reactive state
+
+Ask the user to confirm: *"I want to make sure I understand the interaction — when you type, should existing content [fade/filter/update] as each character is entered, or is this more of a 'search and display results' pattern?"*
+
+Do not guess the interaction model. The ambiguity will propagate into every downstream artefact.
+
 **You do NOT create epics or features.** All decomposition below release level is the Planner's job. If you find yourself writing `artefact.ts create epic` or `artefact.ts create feature`, you have crossed a role boundary. Stop.
 
 **You do NOT resolve architecture or technology decisions.** If routing requires a technology decision, surface it to the user. Do not decide it yourself.

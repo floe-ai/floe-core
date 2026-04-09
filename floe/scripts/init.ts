@@ -75,8 +75,10 @@ if (!existsSync(dodDest)) {
       { id: "acceptance-met", category: "correctness", description: "All acceptance criteria from the feature artefact are satisfied.", severity: "required" },
       { id: "no-regressions", category: "quality", description: "No regressions in the area touched by the change.", severity: "required" },
       { id: "code-reviewed", category: "quality", description: "Code has been reviewed by the Reviewer role and all critical/major findings resolved.", severity: "required" },
-      { id: "docs-updated", category: "documentation", description: "Documentation updated if the change affects public APIs, configuration, or user-facing behaviour.", severity: "recommended" },
+      { id: "docs-updated", category: "documentation", description: "Documentation updated if the change affects public APIs, configuration, or user-facing behaviour. For internal refactors only, reviewer may explicitly waive this with a recorded rationale.", severity: "required" },
       { id: "no-security-issues", category: "security", description: "No known security vulnerabilities introduced. Secrets not committed.", severity: "required" },
+      { id: "smoke-tested", category: "quality", description: "For features that produce or modify runnable application code: the application was launched and the changed behaviour was exercised manually or via automated E2E test. A review that evaluates only source without running the application is incomplete.", severity: "required" },
+      { id: "build-verified", category: "quality", description: "For features that touch the build pipeline or use ESM-only dependencies: the compiled/bundled output was verified to start and run correctly, not just the TypeScript source.", severity: "required" },
     ],
     notes: "This is the project-level Definition of Done. Edit .floe/dod.json to customise criteria for your project.",
   };

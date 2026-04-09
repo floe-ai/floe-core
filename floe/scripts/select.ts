@@ -53,8 +53,10 @@ const completedIds = new Set(
 );
 
 function depsReady(feature: any): boolean {
-  if (!feature.dependencies || feature.dependencies.length === 0) return true;
-  return feature.dependencies.every((d: string) => completedIds.has(d));
+  // Support both canonical field (dependencies) and legacy planner field (depends_on)
+  const deps: string[] = feature.dependencies ?? feature.depends_on ?? [];
+  if (deps.length === 0) return true;
+  return deps.every((d: string) => completedIds.has(d));
 }
 
 const ready = candidates.filter(depsReady);
