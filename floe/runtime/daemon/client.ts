@@ -11,7 +11,7 @@ export async function sendDaemonRequest(
   payload?: Record<string, unknown>,
   options?: DaemonClientOptions,
 ): Promise<DaemonResponse> {
-  const timeoutMs = Math.max(100, options?.timeoutMs ?? 5000);
+  const timeoutMs = Math.max(100, options?.timeoutMs ?? 30_000);
 
   const request: DaemonRequest = {
     id: `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,

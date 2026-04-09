@@ -1024,7 +1024,7 @@ export class DaemonService {
   }
 
   private async eventsSubscribe(payload: EventsSubscribePayload): Promise<Record<string, unknown>> {
-    const waitMs = Math.max(0, Math.min(payload.waitMs ?? 0, 60000));
+    const waitMs = Math.max(0, Math.min(payload.waitMs ?? 0, 300000));
     const limit = payload.limit ?? 100;
     const cursor = payload.cursor ?? 0;
 

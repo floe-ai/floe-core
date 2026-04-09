@@ -127,18 +127,44 @@ export class CodexAdapter implements ProviderAdapter {
     return new Date().toISOString();
   }
 
+  private resolveSandboxMode(stored?: string): string {
+    if (stored && stored.trim()) return stored;
+    if (process.env.FLOE_CODEX_SANDBOX_MODE?.trim()) return process.env.FLOE_CODEX_SANDBOX_MODE.trim();
+    // Daemon workers must be able to execute repo operations without interactive escalation.
+    return "danger-full-access";
+  }
+
+  private resolveApprovalPolicy(stored?: string): string {
+    if (stored && stored.trim()) return stored;
+    if (process.env.FLOE_CODEX_APPROVAL_POLICY?.trim()) return process.env.FLOE_CODEX_APPROVAL_POLICY.trim();
+    // Avoid interactive approval deadlocks in daemon-managed worker sessions.
+    return "never";
+  }
+
+  private resolveNetworkAccessEnabled(stored?: boolean): boolean {
+    if (typeof stored === "boolean") return stored;
+    const envValue = process.env.FLOE_CODEX_NETWORK_ACCESS?.trim().toLowerCase();
+    if (!envValue) return true;
+    return !["0", "false", "no", "off"].includes(envValue);
+  }
+
   hasSession(sessionId: string): boolean {
     return this.sessions.has(sessionId);
   }
 
   async startSession(config: WorkerConfig): Promise<WorkerSession> {
     const client = await this.getClient();
+    const sandboxMode = this.resolveSandboxMode();
+    const approvalPolicy = this.resolveApprovalPolicy();
+    const networkAccessEnabled = this.resolveNetworkAccessEnabled();
 
     // ThreadOptions has no systemPrompt; role content is injected in the first message.
     const threadOpts: CodexThreadOptions = {
       workingDirectory: process.cwd(),
       skipGitRepoCheck: true,
-      approvalPolicy: "on-request",
+      sandboxMode,
+      approvalPolicy,
+      networkAccessEnabled,
     };
     if (config.model) threadOpts.model = config.model;
     if (config.thinking) {
@@ -162,7 +188,13 @@ export class CodexAdapter implements ProviderAdapter {
       roleContentPath: config.roleContentPath,
       createdAt: now,
       updatedAt: now,
-      metadata: { model: config.model, thinking: config.thinking },
+      metadata: {
+        model: config.model,
+        thinking: config.thinking,
+        sandboxMode,
+        approvalPolicy,
+        networkAccessEnabled,
+      },
     };
 
     this.sessions.set(id, {
@@ -201,10 +233,15 @@ export class CodexAdapter implements ProviderAdapter {
     const client = await this.getClient();
     const storedModel = storedSession.metadata?.model as string | undefined;
     const storedThinking = storedSession.metadata?.thinking as string | undefined;
+    const storedSandboxMode = storedSession.metadata?.sandboxMode as string | undefined;
+    const storedApprovalPolicy = storedSession.metadata?.approvalPolicy as string | undefined;
+    const storedNetworkAccessEnabled = storedSession.metadata?.networkAccessEnabled as boolean | undefined;
     const resumeOpts: CodexThreadOptions = {
       workingDirectory: process.cwd(),
       skipGitRepoCheck: true,
-      approvalPolicy: "on-request",
+      sandboxMode: this.resolveSandboxMode(storedSandboxMode),
+      approvalPolicy: this.resolveApprovalPolicy(storedApprovalPolicy),
+      networkAccessEnabled: this.resolveNetworkAccessEnabled(storedNetworkAccessEnabled),
     };
     if (storedModel) resumeOpts.model = storedModel;
     if (storedThinking) {

@@ -262,7 +262,7 @@ async function startDaemonAt(endpoint: string): Promise<boolean> {
   child.unref();
 
   const startedAt = Date.now();
-  const timeoutMs = 5000;
+  const timeoutMs = 20_000;
   while (Date.now() - startedAt < timeoutMs) {
     if (await isDaemonReachable(endpoint)) {
       persistDaemonEndpoint(endpoint);
@@ -388,6 +388,50 @@ function buildDaemonPayload(action: string, args: Record<string, any>): Record<s
   return payload;
 }
 
+function parsePositiveMs(raw: unknown): number | null {
+  if (raw === undefined || raw === null) return null;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 100) return null;
+  return Math.floor(parsed);
+}
+
+function daemonActionTimeoutMs(
+  action: string,
+  args: Record<string, any>,
+  payload: Record<string, unknown>,
+): number {
+  const explicitTimeout = parsePositiveMs(args.timeout);
+  if (explicitTimeout !== null) return explicitTimeout;
+
+  const defaultTimeoutMs = 15_000;
+  const longRunningTimeoutMs = 30 * 60_000; // 30 minutes
+  const eventsSubscribeMinTimeoutMs = 70_000;
+  const eventsSubscribeBufferMs = 10_000;
+
+  const waitMs = Math.max(
+    0,
+    Number(payload.waitMs ?? args["wait-ms"] ?? 0) || 0,
+  );
+
+  if (action === "events.subscribe") {
+    return Math.max(eventsSubscribeMinTimeoutMs, waitMs + eventsSubscribeBufferMs);
+  }
+
+  const longRunningActions = new Set([
+    "route.send",
+    "route.reply",
+    "worker.continue",
+    "call.resolve",
+  ]);
+
+  if (longRunningActions.has(action)) return longRunningTimeoutMs;
+  if (action === "worker.start" && typeof payload.initialMessage === "string" && payload.initialMessage.trim()) {
+    return longRunningTimeoutMs;
+  }
+
+  return defaultTimeoutMs;
+}
+
 async function callDaemonAction(action: string, args: Record<string, any>): Promise<Record<string, unknown>> {
   const explicitEndpoint = daemonEndpointFromArgs(args);
 
@@ -417,11 +461,12 @@ async function callDaemonAction(action: string, args: Record<string, any>): Prom
 
   const endpoint = await ensureDaemonRunning(args);
   const payload = buildDaemonPayload(action, args);
+  const timeoutMs = daemonActionTimeoutMs(action, args, payload);
   const response = await sendDaemonRequest(
     endpoint,
     action,
     payload,
-    { timeoutMs: Math.max(5000, Number(args["wait-ms"] ?? 0) + 2000) },
+    { timeoutMs },
   );
 
   if (!response.ok) {
