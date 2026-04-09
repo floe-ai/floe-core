@@ -5,16 +5,16 @@
  * Usage: bun run .floe/bin/floe.ts <command> [options]
  *
  * Commands:
- *   launch-worker        Launch a new worker session (optional --message, --async)
+ *   launch-worker        Launch a new worker session (daemon-managed, optional --message)
  *   resume-worker        Resume an existing session
- *   message-worker       Send a message to an active worker (optional --async)
+ *   message-worker       Send a message to an active worker (daemon-managed)
  *   get-worker-status    Get session status
- *   get-worker-result    Get async worker result (--session or --result-path)
- *   wait-worker          Block until async worker completes (--session or --result-path, --timeout)
+ *   get-worker-result    Deprecated (legacy async polling removed)
+ *   wait-worker          Deprecated (legacy async polling removed)
  *   replace-worker       Stop and re-launch a worker
  *   stop-worker          Stop a worker session
  *   list-active-workers  List all active sessions
- *   manage-feature-pair  Launch implementer + reviewer pair (starts autonomous feature runner)
+ *   manage-feature-pair  Launch implementer + reviewer pair in daemon runtime
  *   check-alignment      Check approach alignment status for a feature
  *   feature-run-status   Get status of an autonomous feature run
  *   show-dod             Show the project Definition of Done
@@ -43,43 +43,10 @@ import { parseArgs } from "node:util";
 
 
 import { SessionRegistry } from "../runtime/registry.ts";
-import { ResultStore } from "../runtime/results.ts";
 import { loadDod, formatDodForPrompt } from "../runtime/dod.ts";
-import type { ProviderAdapter } from "../runtime/adapters/interface.ts";
+import { sendDaemonRequest } from "../runtime/daemon/client.ts";
 import { readFileSync, existsSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
-
-// ─── Adapter registry ────────────────────────────────────────────────
-
-const adapters = new Map<string, ProviderAdapter>();
-
-const adapterLoadErrors = new Map<string, string>();
-
-async function loadLiveAdapters(): Promise<void> {
-  try {
-    // @ts-ignore — optional peer dependency
-    const { CodexAdapter } = await import("../runtime/adapters/codex.ts");
-    adapters.set("codex", new CodexAdapter());
-  } catch (e: any) {
-    adapterLoadErrors.set("codex", e.message ?? String(e));
-  }
-
-  try {
-    // @ts-ignore — optional peer dependency
-    const { ClaudeAdapter } = await import("../runtime/adapters/claude.ts");
-    adapters.set("claude", new ClaudeAdapter());
-  } catch (e: any) {
-    adapterLoadErrors.set("claude", e.message ?? String(e));
-  }
-
-  try {
-    // @ts-ignore — optional peer dependency
-    const { CopilotAdapter } = await import("../runtime/adapters/copilot.ts");
-    adapters.set("copilot", new CopilotAdapter());
-  } catch (e: any) {
-    adapterLoadErrors.set("copilot", e.message ?? String(e));
-  }
-}
 
 // ─── Project root detection ──────────────────────────────────────────
 
@@ -168,42 +135,6 @@ function validateEnabledProvider(
   return resolved;
 }
 
-function getAdapter(provider: string): { adapter: ProviderAdapter | null; error: string | null } {
-  if (!provider) {
-    return {
-      adapter: null,
-      error: "No provider configured. Run: bun run .floe/bin/floe.ts configure",
-    };
-  }
-  const adapter = adapters.get(provider);
-  if (!adapter) {
-    const loadError = adapterLoadErrors.get(provider);
-    const hint = loadError
-      ? `Adapter for '${provider}' failed to load: ${loadError}`
-      : `No adapter for provider: ${provider}`;
-    return { adapter: null, error: hint };
-  }
-  return { adapter, error: null };
-}
-
-// ─── Role content loading ────────────────────────────────────────────
-
-function readRoleContent(role: string, projectRoot: string): { content: string | undefined; path: string | undefined } {
-  const candidates = [
-    join(projectRoot, ".floe", "roles", `${role}.md`),
-    join(projectRoot, "skills", "floe-exec", "roles", `${role}.md`),
-    join(projectRoot, ".github", "skills", "floe-exec", "roles", `${role}.md`),
-    join(projectRoot, ".agents", "skills", "floe-exec", "roles", `${role}.md`),
-    join(projectRoot, ".claude", "skills", "floe-exec", "roles", `${role}.md`),
-  ];
-  for (const p of candidates) {
-    if (existsSync(p)) {
-      return { content: readFileSync(p, "utf-8"), path: p };
-    }
-  }
-  return { content: undefined, path: undefined };
-}
-
 // ─── Validation helpers ──────────────────────────────────────────────
 
 function featureArtefactExists(featureId: string, projectRoot: string): boolean {
@@ -243,86 +174,283 @@ function getAlignmentStatus(featureId: string, projectRoot: string): {
 
 const projectRoot = findProjectRoot();
 const registry = new SessionRegistry(projectRoot);
-const resultStore = new ResultStore(projectRoot);
+const daemonDir = join(projectRoot, ".floe", "state", "daemon");
+const defaultDaemonSocketPath = join(daemonDir, "floe-daemon.sock");
+const daemonEndpointFile = join(daemonDir, "endpoint.json");
 
-/**
- * Ensure a session is loaded in the adapter's in-memory map.
- * Each CLI invocation is a fresh process — the adapter's Map is empty.
- * This transparently resumes the session from the registry so callers
- * (message-worker, get-worker-status, etc.) don't need to worry about it.
- */
-async function ensureResumed(
-  adapter: ProviderAdapter,
-  sessionId: string,
-  stored: import("../runtime/types.ts").WorkerSession
-): Promise<void> {
-  if (adapter.hasSession(sessionId)) return;
-
-  let roleContent: string | undefined;
-  if (stored.roleContentPath && existsSync(stored.roleContentPath)) {
-    try { roleContent = readFileSync(stored.roleContentPath, "utf-8"); } catch {}
+function stableProjectPort(root: string): number {
+  let hash = 0;
+  for (let i = 0; i < root.length; i++) {
+    hash = (hash * 31 + root.charCodeAt(i)) % 10000;
   }
-
-  const session = await adapter.resumeSession(
-    sessionId,
-    stored,
-    roleContent ? { roleContent } : undefined
-  );
-  registry.update(sessionId, { status: session.status, updatedAt: session.updatedAt, metadata: session.metadata });
+  return 42000 + (hash % 1000);
 }
 
-/**
- * Dispatch a message (or launch+message) in a background subprocess.
- * Returns immediately with the result file path for polling.
- */
-function dispatchAsync(args: Record<string, any>): { ok: true; dispatched: true; sessionId?: string; resultPath: string } {
-  const sessionId = args.session as string | undefined;
-  const resultPath = resultStore.writePending(sessionId ?? "launch");
+const defaultDaemonTcpEndpoint = `tcp://127.0.0.1:${stableProjectPort(projectRoot)}`;
 
-  const asyncWorkerPath = join(dirname(new URL(import.meta.url).pathname), "async-worker.ts");
+function parseJsonObject(raw: string | undefined, flagName: string): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`${flagName} must be a JSON object`);
+    }
+    return parsed as Record<string, unknown>;
+  } catch (error: any) {
+    throw new Error(`Invalid ${flagName} JSON: ${error?.message ?? String(error)}`);
+  }
+}
 
-  const subArgs: string[] = ["run", asyncWorkerPath, "--result-path", resultPath];
+function uniqueEndpoints(list: Array<string | undefined>): string[] {
+  const seen = new Set<string>();
+  const endpoints: string[] = [];
+  for (const value of list) {
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    endpoints.push(value);
+  }
+  return endpoints;
+}
 
-  if (args._launch) {
-    subArgs.push("--launch");
-    if (args.role) subArgs.push("--role", args.role);
-    if (args.provider) subArgs.push("--provider", args.provider);
-    if (args.feature) subArgs.push("--feature", args.feature);
-    if (args.epic) subArgs.push("--epic", args.epic);
-    if (args.release) subArgs.push("--release", args.release);
-    if (args.context) subArgs.push("--context", args.context);
-    if (args.model) subArgs.push("--model", args.model);
-    if (args.thinking) subArgs.push("--thinking", args.thinking);
+function readPersistedDaemonEndpoint(): string | null {
+  if (!existsSync(daemonEndpointFile)) return null;
+  try {
+    const data = JSON.parse(readFileSync(daemonEndpointFile, "utf-8")) as { endpoint?: string };
+    if (!data.endpoint || typeof data.endpoint !== "string") return null;
+    return data.endpoint;
+  } catch {
+    return null;
+  }
+}
+
+function persistDaemonEndpoint(endpoint: string): void {
+  mkdirSync(daemonDir, { recursive: true });
+  writeFileSync(daemonEndpointFile, JSON.stringify({ endpoint, updatedAt: new Date().toISOString() }, null, 2) + "\n", "utf-8");
+}
+
+function daemonEndpointFromArgs(args: Record<string, any>): string | undefined {
+  return (args.endpoint as string | undefined) ?? (args.socket as string | undefined);
+}
+
+async function isDaemonReachable(endpoint: string): Promise<boolean> {
+  try {
+    const response = await sendDaemonRequest(endpoint, "runtime.status", {}, { timeoutMs: 300 });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function startDaemonAt(endpoint: string): Promise<boolean> {
+  if (await isDaemonReachable(endpoint)) return true;
+
+  mkdirSync(daemonDir, { recursive: true });
+
+  const daemonPath = join(dirname(new URL(import.meta.url).pathname), "floe-daemon.ts");
+  const spawnArgs = ["bun", "run", daemonPath];
+  if (endpoint.startsWith("tcp://")) {
+    const url = new URL(endpoint);
+    spawnArgs.push("--tcp-host", url.hostname, "--tcp-port", url.port);
   } else {
-    if (sessionId) subArgs.push("--session", sessionId);
+    spawnArgs.push("--socket", endpoint);
   }
 
-  if (args.message) subArgs.push("--message", args.message);
-
-  const child = Bun.spawn(["bun", ...subArgs], {
+  const child = Bun.spawn(spawnArgs, {
     cwd: projectRoot,
     stdio: ["ignore", "ignore", "ignore"],
   });
   child.unref();
 
-  return { ok: true, dispatched: true, sessionId, resultPath };
+  const startedAt = Date.now();
+  const timeoutMs = 5000;
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await isDaemonReachable(endpoint)) {
+      persistDaemonEndpoint(endpoint);
+      return true;
+    }
+    await Bun.sleep(100);
+  }
+
+  return false;
+}
+
+async function findReachableEndpoint(candidates: string[]): Promise<string | null> {
+  for (const endpoint of candidates) {
+    if (await isDaemonReachable(endpoint)) {
+      persistDaemonEndpoint(endpoint);
+      return endpoint;
+    }
+  }
+  return null;
+}
+
+async function ensureDaemonRunning(args: Record<string, any>): Promise<string> {
+  const explicitEndpoint = daemonEndpointFromArgs(args);
+  const persistedEndpoint = readPersistedDaemonEndpoint();
+
+  const reachable = await findReachableEndpoint(
+    uniqueEndpoints([
+      explicitEndpoint,
+      persistedEndpoint,
+      defaultDaemonSocketPath,
+      defaultDaemonTcpEndpoint,
+    ]),
+  );
+  if (reachable) return reachable;
+
+  // Start with unix socket first, then local-only TCP fallback.
+  const startOrder = uniqueEndpoints([
+    explicitEndpoint,
+    defaultDaemonSocketPath,
+    defaultDaemonTcpEndpoint,
+  ]);
+
+  for (const endpoint of startOrder) {
+    if (await startDaemonAt(endpoint)) return endpoint;
+  }
+
+  throw new Error(
+    `Timed out starting floe-daemon. Tried endpoints: ${startOrder.join(", ")}`,
+  );
+}
+
+function buildDaemonPayload(action: string, args: Record<string, any>): Record<string, unknown> {
+  const payload: Record<string, unknown> = parseJsonObject(args.data as string | undefined, "--data");
+
+  if (args.run !== undefined && payload.runId === undefined) payload.runId = args.run;
+  if (args.worker !== undefined && payload.workerId === undefined) payload.workerId = args.worker;
+  if (args.call !== undefined && payload.callId === undefined) payload.callId = args.call;
+  if (args.role !== undefined && payload.role === undefined) payload.role = args.role;
+  if (args.provider !== undefined && payload.provider === undefined) payload.provider = args.provider;
+  if (args.feature !== undefined && payload.featureId === undefined) payload.featureId = args.feature;
+  if (args.epic !== undefined && payload.epicId === undefined) payload.epicId = args.epic;
+  if (args.release !== undefined && payload.releaseId === undefined) payload.releaseId = args.release;
+  if (args.scope !== undefined && payload.scope === undefined) payload.scope = args.scope;
+  if (args.target !== undefined && payload.target === undefined) payload.target = args.target;
+  if (args.session !== undefined && payload.sessionRef === undefined) payload.sessionRef = args.session;
+  if (args.model !== undefined && payload.model === undefined) payload.model = args.model;
+  if (args.thinking !== undefined && payload.thinking === undefined) payload.thinking = args.thinking;
+  if (args.message !== undefined && payload.message === undefined) payload.message = args.message;
+  if (args.reason !== undefined && payload.reason === undefined) payload.reason = args.reason;
+  if (args.type !== undefined && payload.type === undefined) payload.type = args.type;
+  if (args.objective !== undefined && payload.objective === undefined) payload.objective = args.objective;
+  if (args["run-state"] !== undefined && payload.state === undefined) payload.state = args["run-state"];
+  if (args.to !== undefined && payload.to === undefined) payload.to = args.to;
+  if (args.cursor !== undefined && payload.cursor === undefined) payload.cursor = Number(args.cursor);
+  if (args.limit !== undefined && payload.limit === undefined) payload.limit = Number(args.limit);
+  if (args["wait-ms"] !== undefined && payload.waitMs === undefined) payload.waitMs = Number(args["wait-ms"]);
+
+  if (args.participants !== undefined && payload.participants === undefined) {
+    payload.participants = String(args.participants).split(",").map((part) => part.trim()).filter(Boolean);
+  }
+  if (args.budgets !== undefined && payload.budgets === undefined) {
+    payload.budgets = parseJsonObject(String(args.budgets), "--budgets");
+  }
+  if (args.payload !== undefined && payload.payload === undefined) {
+    payload.payload = parseJsonObject(String(args.payload), "--payload");
+  }
+  if (args.response !== undefined && payload.responsePayload === undefined) {
+    payload.responsePayload = parseJsonObject(String(args.response), "--response");
+  }
+  if (args.context !== undefined && payload.context === undefined) {
+    try {
+      payload.context = parseJsonObject(String(args.context), "--context");
+    } catch {
+      payload.context = { text: String(args.context) };
+    }
+  }
+
+  if (action === "worker.start" && payload.initialMessage === undefined && args.message) {
+    payload.initialMessage = args.message;
+    delete payload.message;
+  }
+
+  if (action === "worker.continue") {
+    if (payload.continuation === undefined && payload.message !== undefined) {
+      payload.continuation = payload.message;
+      delete payload.message;
+    }
+  }
+
+  if (action === "call.blocking") {
+    if (payload.callType === undefined && payload.type !== undefined) {
+      payload.callType = payload.type;
+    }
+  }
+
+  if (action === "route.reply") {
+    if (payload.response === undefined && payload.responsePayload !== undefined) {
+      payload.response = payload.responsePayload;
+      delete payload.responsePayload;
+    }
+  }
+
+  return payload;
+}
+
+async function callDaemonAction(action: string, args: Record<string, any>): Promise<Record<string, unknown>> {
+  const explicitEndpoint = daemonEndpointFromArgs(args);
+
+  if (action === "runtime.ensure") {
+    const endpoint = await ensureDaemonRunning(args);
+    const status = await sendDaemonRequest(endpoint, "runtime.status", {}, { timeoutMs: 2000 });
+    if (!status.ok) return { ok: false, error: status.error ?? "Daemon status failed" };
+    return { ok: true, action, endpoint, ...(status.result ?? {}) };
+  }
+
+  if (action === "runtime.shutdown") {
+    const reachable = await findReachableEndpoint(
+      uniqueEndpoints([
+        explicitEndpoint,
+        readPersistedDaemonEndpoint(),
+        defaultDaemonSocketPath,
+        defaultDaemonTcpEndpoint,
+      ]),
+    );
+    if (!reachable) {
+      return { ok: true, action, endpoint: explicitEndpoint ?? null, stopped: true, alreadyStopped: true };
+    }
+    const shutdown = await sendDaemonRequest(reachable, action, {}, { timeoutMs: 5000 });
+    if (!shutdown.ok) return { ok: false, error: shutdown.error ?? "Daemon shutdown failed" };
+    return { ok: true, action, endpoint: reachable, ...(shutdown.result ?? {}) };
+  }
+
+  const endpoint = await ensureDaemonRunning(args);
+  const payload = buildDaemonPayload(action, args);
+  const response = await sendDaemonRequest(
+    endpoint,
+    action,
+    payload,
+    { timeoutMs: Math.max(5000, Number(args["wait-ms"] ?? 0) + 2000) },
+  );
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      action,
+      endpoint,
+      payload,
+      error: response.error ?? "Daemon action failed",
+    };
+  }
+
+  return {
+    ok: true,
+    action,
+    endpoint,
+    ...(response.result ?? {}),
+  };
 }
 
 async function launchWorker(args: Record<string, any>) {
   const role = args.role;
   if (!role) return { ok: false, error: "Missing required flag: --role" };
-
-  const config = loadConfig(projectRoot);
-
-  // Pre-flight: enabledProviders must be set
-  if (!config?.enabledProviders) {
-    return { ok: false, error: "Provider allowlist not set. Run: bun run .floe/bin/floe.ts configure" };
+  if (args.async) {
+    return {
+      ok: false,
+      error: "Legacy async subprocess path removed. Use daemon events: events.subscribe / events.replay.",
+    };
   }
-
-  const resolved = resolveProvider(role, args, config);
-  if (resolved.error) return { ok: false, error: resolved.error };
-  const { adapter, error } = getAdapter(resolved.provider);
-  if (!adapter) return { ok: false, error };
 
   // Planner scope validation
   if (role === "planner") {
@@ -349,78 +477,51 @@ async function launchWorker(args: Record<string, any>) {
     return { ok: false, error: `Feature artefact not found: ${args.feature}. Create the feature via the Planner first.` };
   }
 
-  const { content: roleContent, path: roleContentPath } = readRoleContent(role, projectRoot);
+  const runtimeResult = await callDaemonAction("worker.start", args);
+  if (!runtimeResult.ok) return runtimeResult;
 
-  // Inject Definition of Done for reviewer and implementer roles
-  let contextWithDod = args.context as string | undefined;
-  if (role === "reviewer" || role === "implementer") {
-    const dod = loadDod(projectRoot);
-    if (dod) {
-      const dodText = formatDodForPrompt(dod);
-      contextWithDod = contextWithDod ? `${contextWithDod}\n\n${dodText}` : dodText;
-    }
-  }
+  const session = (runtimeResult as any).session as Record<string, any> | undefined;
+  const initial = (runtimeResult as any).initialResult as Record<string, any> | null | undefined;
+  const workerId = (runtimeResult as any).workerId as string;
 
-  // Async dispatch: fork a background subprocess and return immediately
-  if (args.async && args.message) {
-    return dispatchAsync({ ...args, _launch: true, provider: resolved.provider, model: resolved.model, thinking: resolved.thinking });
-  }
-
-  const session = await adapter.startSession({
-    role,
-    provider: resolved.provider as any,
-    featureId: args.feature,
-    epicId: args.epic,
-    releaseId: args.release,
-    roleContent,
-    roleContentPath,
-    contextAddendum: contextWithDod,
-    model: resolved.model,
-    thinking: resolved.thinking,
-  });
-
-  registry.register(session);
-
-  // If --message provided, send the initial task in the same process
-  const result: Record<string, any> = {
+  return {
     ok: true,
-    sessionId: session.id,
-    role: session.role,
-    provider: session.provider,
-    status: session.status,
+    sessionId: workerId,
+    workerId,
+    role: session?.role ?? role,
+    provider: session?.provider ?? args.provider ?? null,
+    status: session?.status ?? "active",
+    ...(initial
+      ? {
+          content: initial.content,
+          finishReason: initial.finishReason,
+          usage: initial.usage,
+        }
+      : {}),
   };
-
-  if (args.message) {
-    const msgResult = await adapter.sendMessage(session.id, args.message);
-    const now = new Date().toISOString();
-    const fresh = adapter.getSession(session.id);
-    registry.update(session.id, { lastMessageAt: now, metadata: fresh?.metadata ?? session.metadata });
-    result.content = msgResult.content;
-    result.finishReason = msgResult.finishReason;
-    result.usage = msgResult.usage;
-  }
-
-  return result;
 }
 
 async function resumeWorker(args: Record<string, any>) {
-  const stored = registry.get(args.session);
-  if (!stored) return { ok: false, error: `Session not found: ${args.session}` };
-
-  const { adapter, error } = getAdapter(stored.provider);
-  if (!adapter) return { ok: false, error };
-
-  await ensureResumed(adapter, args.session, stored);
-  const updated = registry.get(args.session);
-  return { ok: true, sessionId: updated?.id ?? args.session, status: updated?.status ?? "active" };
+  if (!args.session) return { ok: false, error: "resume-worker requires --session <id>" };
+  const runtimeResult = await callDaemonAction("worker.resume", { ...args, worker: args.session });
+  if (!runtimeResult.ok) return runtimeResult;
+  const worker = (runtimeResult as any).worker as Record<string, any> | undefined;
+  return { ok: true, sessionId: args.session, status: worker?.state ?? "active", worker };
 }
 
 async function messageWorker(args: Record<string, any>) {
+  if (!args.session) return { ok: false, error: "message-worker requires --session <id>" };
+  if (!args.message) return { ok: false, error: "message-worker requires --message '<text>'" };
+
+  if (args.async) {
+    return {
+      ok: false,
+      error: "Legacy async subprocess path removed. Use daemon events: events.subscribe / events.replay.",
+    };
+  }
+
   const stored = registry.get(args.session);
   if (!stored) return { ok: false, error: `Session not found: ${args.session}` };
-
-  const { adapter, error } = getAdapter(stored.provider);
-  if (!adapter) return { ok: false, error };
 
   // Hard alignment gate: block implementer messages when approach not approved
   if (stored.role === "implementer" && stored.featureId && !args["force-no-alignment"]) {
@@ -437,71 +538,71 @@ async function messageWorker(args: Record<string, any>) {
     }
   }
 
-  // Async dispatch: fork a background subprocess and return immediately
-  if (args.async) {
-    return dispatchAsync(args);
-  }
+  const runtimeResult = await callDaemonAction("route.send", {
+    ...args,
+    to: args.session,
+  });
+  if (!runtimeResult.ok) return runtimeResult;
 
-  // Auto-resume: each CLI invocation is a fresh process with empty adapter state
-  await ensureResumed(adapter, args.session, stored);
-
-  const result = await adapter.sendMessage(args.session, args.message);
-  const now = new Date().toISOString();
-
-  const fresh = adapter.getSession(args.session);
-  registry.update(args.session, { lastMessageAt: now, metadata: fresh?.metadata });
-
-  return { ok: true, sessionId: args.session, content: result.content, finishReason: result.finishReason, usage: result.usage };
+  const result = (runtimeResult as any).result as Record<string, any> | undefined;
+  return {
+    ok: true,
+    sessionId: args.session,
+    content: result?.content ?? "",
+    finishReason: result?.finishReason,
+    usage: result?.usage,
+  };
 }
 
 async function getWorkerStatus(args: Record<string, any>) {
-  const stored = registry.get(args.session);
-  if (!stored) return { ok: false, error: `Session not found: ${args.session}` };
-
-  const { adapter, error } = getAdapter(stored.provider);
-  if (!adapter) return { ok: false, error };
-
-  await ensureResumed(adapter, args.session, stored);
-  const status = await adapter.getStatus(args.session);
-  return { ok: true, sessionId: args.session, role: stored.role, provider: stored.provider, status, featureId: stored.featureId };
+  if (!args.session) return { ok: false, error: "get-worker-status requires --session <id>" };
+  const runtimeResult = await callDaemonAction("worker.get", { ...args, worker: args.session });
+  if (!runtimeResult.ok) return runtimeResult;
+  const worker = (runtimeResult as any).worker as Record<string, any> | undefined;
+  const session = (runtimeResult as any).session as Record<string, any> | undefined;
+  return {
+    ok: true,
+    sessionId: args.session,
+    role: session?.role ?? worker?.role ?? null,
+    provider: session?.provider ?? worker?.provider ?? null,
+    status: worker?.state ?? session?.status ?? "unknown",
+    featureId: session?.featureId ?? worker?.metadata?.featureId ?? null,
+  };
 }
 
 async function replaceWorker(args: Record<string, any>) {
-  const stored = registry.get(args.session);
-  if (!stored) return { ok: false, error: `Session not found: ${args.session}` };
+  if (!args.session) return { ok: false, error: "replace-worker requires --session <id>" };
+  const info = await callDaemonAction("worker.get", { ...args, worker: args.session });
+  if (!info.ok) return info;
 
-  const { adapter, error } = getAdapter(stored.provider);
-  if (adapter) {
-    // Best-effort resume so stop/close can clean up provider resources
-    await ensureResumed(adapter, args.session, stored).catch(() => {});
-    await adapter.stopSession(args.session).catch(() => {});
-    await adapter.closeSession(args.session).catch(() => {});
-  }
-  registry.setStatus(args.session, "stopped");
+  const session = (info as any).session as Record<string, any> | undefined;
+  if (!session) return { ok: false, error: `Session not found: ${args.session}` };
 
-  const newSession = await launchWorker({
-    role: stored.role,
-    provider: stored.provider,
-    feature: stored.featureId,
-    epic: stored.epicId,
-    release: stored.releaseId,
+  const stopped = await callDaemonAction("worker.stop", { ...args, worker: args.session, reason: args.reason ?? "replace-worker" });
+  if (!stopped.ok) return stopped;
+
+  const started = await callDaemonAction("worker.start", {
+    ...args,
+    role: session.role,
+    provider: session.provider,
+    feature: session.featureId,
+    epic: session.epicId,
+    release: session.releaseId,
   });
+  if (!started.ok) return started;
 
-  return { ok: true, replacedSessionId: args.session, newSessionId: (newSession as any).sessionId, reason: args.reason };
+  return {
+    ok: true,
+    replacedSessionId: args.session,
+    newSessionId: (started as any).workerId,
+    reason: args.reason ?? null,
+  };
 }
 
 async function stopWorker(args: Record<string, any>) {
-  const stored = registry.get(args.session);
-  if (!stored) return { ok: false, error: `Session not found: ${args.session}` };
-
-  const { adapter, error } = getAdapter(stored.provider);
-  if (adapter) {
-    await ensureResumed(adapter, args.session, stored).catch(() => {});
-    await adapter.stopSession(args.session).catch(() => {});
-    await adapter.closeSession(args.session).catch(() => {});
-  }
-  registry.setStatus(args.session, "stopped");
-
+  if (!args.session) return { ok: false, error: "stop-worker requires --session <id>" };
+  const runtimeResult = await callDaemonAction("worker.stop", { ...args, worker: args.session });
+  if (!runtimeResult.ok) return runtimeResult;
   return { ok: true, sessionId: args.session, stopped: true };
 }
 
@@ -520,55 +621,17 @@ async function listActiveWorkers(args: Record<string, any>) {
 }
 
 async function getWorkerResult(args: Record<string, any>) {
-  const sessionId = args.session as string;
-  const resultPath = args["result-path"] as string;
-
-  if (resultPath) {
-    const result = resultStore.read(resultPath);
-    if (!result) return { ok: false, error: `Result file not found: ${resultPath}` };
-    return { ok: true, ...result };
-  }
-
-  if (!sessionId) return { ok: false, error: "get-worker-result requires --session <id> or --result-path <path>" };
-
-  const latest = resultStore.latest(sessionId);
-  if (!latest) return { ok: false, error: `No results found for session: ${sessionId}` };
-  return { ok: true, resultPath: latest.path, ...latest.result };
+  return {
+    ok: false,
+    error: "get-worker-result is removed in daemon runtime mode. Use events.replay or events.subscribe.",
+  };
 }
 
 async function waitWorker(args: Record<string, any>) {
-  const sessionId = args.session as string;
-  const resultPath = args["result-path"] as string;
-  const timeoutMs = parseInt(args.timeout ?? "300000", 10); // default 5 minutes
-  const pollIntervalMs = 2000;
-
-  if (!sessionId && !resultPath) {
-    return { ok: false, error: "wait-worker requires --session <id> or --result-path <path>" };
-  }
-
-  const startTime = Date.now();
-  while (Date.now() - startTime < timeoutMs) {
-    let result: import("../runtime/results.ts").WorkerResult | null = null;
-    let rPath = resultPath;
-
-    if (resultPath) {
-      result = resultStore.read(resultPath);
-    } else {
-      const latest = resultStore.latest(sessionId);
-      if (latest) {
-        result = latest.result;
-        rPath = latest.path;
-      }
-    }
-
-    if (result && result.status !== "pending") {
-      return { ok: true, resultPath: rPath, ...result };
-    }
-
-    await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
-  }
-
-  return { ok: false, error: "Timed out waiting for worker result", timeoutMs };
+  return {
+    ok: false,
+    error: "wait-worker is removed in daemon runtime mode. Use events.subscribe --wait-ms <ms>.",
+  };
 }
 
 async function manageFeaturePair(args: Record<string, any>) {
@@ -596,33 +659,58 @@ async function manageFeaturePair(args: Record<string, any>) {
   if (implResolved.error) return { ok: false, error: implResolved.error };
   if (revResolved.error) return { ok: false, error: revResolved.error };
 
-  const [implementer, reviewer] = await Promise.all([
-    launchWorker({ role: "implementer", provider: implResolved.provider, feature: args.feature, epic: args.epic, release: args.release }),
-    launchWorker({ role: "reviewer", provider: revResolved.provider, feature: args.feature, epic: args.epic, release: args.release }),
-  ]);
-
-  // Check both workers launched successfully before spawning runner
-  if (!(implementer as any).ok) return { ok: false, error: `Implementer launch failed: ${(implementer as any).error ?? "unknown error"}` };
-  if (!(reviewer as any).ok) return { ok: false, error: `Reviewer launch failed: ${(reviewer as any).error ?? "unknown error"}` };
-
-  // Spawn feature runner in background — "run" will initialise state if needed, then loop to completion
-  const featureRunnerPath = join(dirname(import.meta.dir), "scripts", "feature-runner.ts");
-  const child = Bun.spawn(["bun", "run", featureRunnerPath, "run",
-    "--feature", args.feature,
-    "--impl-session", (implementer as any).sessionId,
-    "--rev-session", (reviewer as any).sessionId,
-  ], {
-    cwd: projectRoot,
-    stdio: ["ignore", "ignore", "ignore"],
+  const runStart = await callDaemonAction("run.start", {
+    ...args,
+    type: "feature_execution",
+    objective: `Execute feature ${args.feature}`,
+    data: JSON.stringify({
+      participants: [],
+      metadata: {
+        featureId: args.feature,
+        epicId: args.epic ?? null,
+        releaseId: args.release ?? null,
+      },
+    }),
   });
-  child.unref();
+  if (!runStart.ok) return runStart;
+  const runId = (runStart as any).run?.runId as string | undefined;
+  if (!runId) return { ok: false, error: "Daemon did not return runId from run.start" };
+
+  const implementer = await callDaemonAction("worker.start", {
+    ...args,
+    run: runId,
+    role: "implementer",
+    provider: implResolved.provider,
+    feature: args.feature,
+    epic: args.epic,
+    release: args.release,
+  });
+  if (!implementer.ok) {
+    await callDaemonAction("run.escalate", { ...args, run: runId, reason: `Implementer launch failed: ${(implementer as any).error ?? "unknown error"}` });
+    return { ok: false, error: `Implementer launch failed: ${(implementer as any).error ?? "unknown error"}`, runId };
+  }
+
+  const reviewer = await callDaemonAction("worker.start", {
+    ...args,
+    run: runId,
+    role: "reviewer",
+    provider: revResolved.provider,
+    feature: args.feature,
+    epic: args.epic,
+    release: args.release,
+  });
+  if (!reviewer.ok) {
+    await callDaemonAction("run.escalate", { ...args, run: runId, reason: `Reviewer launch failed: ${(reviewer as any).error ?? "unknown error"}` });
+    return { ok: false, error: `Reviewer launch failed: ${(reviewer as any).error ?? "unknown error"}`, runId };
+  }
 
   return {
     ok: true,
     featureId: args.feature,
-    featureRunnerStarted: true,
-    implementer: { sessionId: (implementer as any).sessionId, provider: implResolved.provider },
-    reviewer: { sessionId: (reviewer as any).sessionId, provider: revResolved.provider },
+    runId,
+    runtimeManaged: true,
+    implementer: { sessionId: (implementer as any).workerId, provider: implResolved.provider },
+    reviewer: { sessionId: (reviewer as any).workerId, provider: revResolved.provider },
   };
 }
 
@@ -987,6 +1075,10 @@ async function updateConfig(args: Record<string, any>) {
   return { ok: true, message: `Updated ${configPath}`, config };
 }
 
+function daemonCommand(action: string) {
+  return async (args: Record<string, any>) => callDaemonAction(action, args);
+}
+
 // ─── CLI dispatch ────────────────────────────────────────────────────
 
 const [command, ...rest] = Bun.argv.slice(2);
@@ -1019,13 +1111,28 @@ const { values: opts } = parseArgs({
     escalation: { type: "string" },
     resolution: { type: "string" },
     status: { type: "string" },
+    socket: { type: "string" },
+    endpoint: { type: "string" },
+    data: { type: "string" },
+    run: { type: "string" },
+    worker: { type: "string" },
+    call: { type: "string" },
+    type: { type: "string" },
+    objective: { type: "string" },
+    participants: { type: "string" },
+    budgets: { type: "string" },
+    payload: { type: "string" },
+    response: { type: "string" },
+    cursor: { type: "string" },
+    limit: { type: "string" },
+    "wait-ms": { type: "string" },
+    to: { type: "string" },
+    "run-state": { type: "string" },
   },
   strict: false,
 });
 
 async function main() {
-  await loadLiveAdapters();
-
   const commands: Record<string, (args: Record<string, any>) => Promise<any>> = {
     "launch-worker": launchWorker,
     "resume-worker": resumeWorker,
@@ -1047,6 +1154,58 @@ async function main() {
     "show-config": showConfig,
     "list-models": listModels,
     "update-config": updateConfig,
+
+    // Daemon runtime control
+    "runtime.ensure": daemonCommand("runtime.ensure"),
+    "runtime.status": daemonCommand("runtime.status"),
+    "runtime.shutdown": daemonCommand("runtime.shutdown"),
+    "runtime-ensure": daemonCommand("runtime.ensure"),
+    "runtime-status": daemonCommand("runtime.status"),
+    "runtime-shutdown": daemonCommand("runtime.shutdown"),
+
+    // Run lifecycle
+    "run.start": daemonCommand("run.start"),
+    "run.complete": daemonCommand("run.complete"),
+    "run.escalate": daemonCommand("run.escalate"),
+    "run.get": daemonCommand("run.get"),
+    "run-start": daemonCommand("run.start"),
+    "run-complete": daemonCommand("run.complete"),
+    "run-escalate": daemonCommand("run.escalate"),
+    "run-get": daemonCommand("run.get"),
+
+    // Worker lifecycle
+    "worker.start": daemonCommand("worker.start"),
+    "worker.resume": daemonCommand("worker.resume"),
+    "worker.continue": daemonCommand("worker.continue"),
+    "worker.interrupt": daemonCommand("worker.interrupt"),
+    "worker.stop": daemonCommand("worker.stop"),
+    "worker.recover": daemonCommand("worker.recover"),
+    "worker.get": daemonCommand("worker.get"),
+    "worker-start": daemonCommand("worker.start"),
+    "worker-resume": daemonCommand("worker.resume"),
+    "worker-continue": daemonCommand("worker.continue"),
+    "worker-interrupt": daemonCommand("worker.interrupt"),
+    "worker-stop": daemonCommand("worker.stop"),
+    "worker-recover": daemonCommand("worker.recover"),
+    "worker-get": daemonCommand("worker.get"),
+
+    // Continuation call lifecycle
+    "call.blocking": daemonCommand("call.blocking"),
+    "call.resolve": daemonCommand("call.resolve"),
+    "call.detectOrphaned": daemonCommand("call.detectOrphaned"),
+    "call-blocking": daemonCommand("call.blocking"),
+    "call-resolve": daemonCommand("call.resolve"),
+    "call-detect-orphaned": daemonCommand("call.detectOrphaned"),
+
+    // Routing and events
+    "route.send": daemonCommand("route.send"),
+    "route.reply": daemonCommand("route.reply"),
+    "events.subscribe": daemonCommand("events.subscribe"),
+    "events.replay": daemonCommand("events.replay"),
+    "route-send": daemonCommand("route.send"),
+    "route-reply": daemonCommand("route.reply"),
+    "events-subscribe": daemonCommand("events.subscribe"),
+    "events-replay": daemonCommand("events.replay"),
   };
 
   const handler = commands[command];
