@@ -35,6 +35,8 @@ interface ClaudeSessionMeta {
   systemPrompt?: string;
   model?: string;
   thinking?: string;
+  permissionMode?: string;
+  allowDangerouslySkipPermissions?: boolean;
 }
 
 export class ClaudeAdapter implements ProviderAdapter {
@@ -72,6 +74,30 @@ export class ClaudeAdapter implements ProviderAdapter {
     return crypto.randomUUID();
   }
 
+  private parseBooleanEnv(name: string): boolean | undefined {
+    const raw = process.env[name]?.trim().toLowerCase();
+    if (!raw) return undefined;
+    if (["1", "true", "yes", "on"].includes(raw)) return true;
+    if (["0", "false", "no", "off"].includes(raw)) return false;
+    return undefined;
+  }
+
+  private resolvePermissionMode(stored?: string): string {
+    if (stored && stored.trim()) return stored;
+    if (process.env.FLOE_CLAUDE_PERMISSION_MODE?.trim()) {
+      return process.env.FLOE_CLAUDE_PERMISSION_MODE.trim();
+    }
+    // Daemon-managed workers should not block on interactive permission prompts.
+    return "bypassPermissions";
+  }
+
+  private resolveAllowDangerouslySkipPermissions(stored: boolean | undefined, permissionMode: string): boolean {
+    if (typeof stored === "boolean") return stored;
+    const envOverride = this.parseBooleanEnv("FLOE_CLAUDE_ALLOW_DANGEROUSLY_SKIP_PERMISSIONS");
+    if (typeof envOverride === "boolean") return envOverride;
+    return permissionMode === "bypassPermissions";
+  }
+
   private now(): string {
     return new Date().toISOString();
   }
@@ -92,6 +118,9 @@ export class ClaudeAdapter implements ProviderAdapter {
 
     const id = this.generateId();
     const claudeSessionId = this.generateSessionId();
+    const systemPrompt = this.buildSystemPrompt(config);
+    const permissionMode = this.resolvePermissionMode();
+    const allowDangerouslySkipPermissions = this.resolveAllowDangerouslySkipPermissions(undefined, permissionMode);
     const now = this.now();
 
     const session: WorkerSession = {
@@ -105,15 +134,24 @@ export class ClaudeAdapter implements ProviderAdapter {
       roleContentPath: config.roleContentPath,
       createdAt: now,
       updatedAt: now,
-      metadata: { claudeSessionId },
+      metadata: {
+        claudeSessionId,
+        model: config.model,
+        thinking: config.thinking,
+        permissionMode,
+        allowDangerouslySkipPermissions,
+        systemPrompt,
+      },
     };
 
     this.sessions.set(id, {
       claudeSessionId,
       session,
-      systemPrompt: this.buildSystemPrompt(config),
+      systemPrompt,
       model: config.model,
       thinking: config.thinking,
+      permissionMode,
+      allowDangerouslySkipPermissions,
     });
     return session;
   }
@@ -150,7 +188,32 @@ export class ClaudeAdapter implements ProviderAdapter {
   rehydrateSession(session: WorkerSession): void {
     const claudeSessionId = session.metadata?.claudeSessionId as string | undefined;
     if (!claudeSessionId) throw new Error("Session metadata missing claudeSessionId");
-    this.sessions.set(session.id, { claudeSessionId, session });
+    const model = typeof session.metadata?.model === "string" ? (session.metadata.model as string) : undefined;
+    const thinking = typeof session.metadata?.thinking === "string" ? (session.metadata.thinking as string) : undefined;
+    const systemPrompt = typeof session.metadata?.systemPrompt === "string"
+      ? (session.metadata.systemPrompt as string)
+      : undefined;
+    const storedPermissionMode = typeof session.metadata?.permissionMode === "string"
+      ? (session.metadata.permissionMode as string)
+      : undefined;
+    const permissionMode = this.resolvePermissionMode(storedPermissionMode);
+    const storedAllowDangerouslySkipPermissions = typeof session.metadata?.allowDangerouslySkipPermissions === "boolean"
+      ? (session.metadata.allowDangerouslySkipPermissions as boolean)
+      : undefined;
+    const allowDangerouslySkipPermissions = this.resolveAllowDangerouslySkipPermissions(
+      storedAllowDangerouslySkipPermissions,
+      permissionMode,
+    );
+
+    this.sessions.set(session.id, {
+      claudeSessionId,
+      session,
+      model,
+      thinking,
+      systemPrompt,
+      permissionMode,
+      allowDangerouslySkipPermissions,
+    });
   }
 
   /** Build query options for the Claude Agent SDK query() call. */
@@ -160,6 +223,10 @@ export class ClaudeAdapter implements ProviderAdapter {
       sessionId: meta.claudeSessionId,
       persistSession: true,
       ...(meta.systemPrompt ? { systemPrompt: meta.systemPrompt } : {}),
+      ...(meta.permissionMode ? { permissionMode: meta.permissionMode } : {}),
+      ...(typeof meta.allowDangerouslySkipPermissions === "boolean"
+        ? { allowDangerouslySkipPermissions: meta.allowDangerouslySkipPermissions }
+        : {}),
     };
     if (meta.model) opts.model = meta.model;
     if (meta.thinking === "high") {

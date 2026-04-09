@@ -4,7 +4,7 @@
  * SDK reference:  https://docs.github.com/en/copilot/how-tos/copilot-sdk
  * SDK source:     https://github.com/github/copilot-sdk
  * Getting started: https://github.com/github/copilot-sdk/blob/main/docs/getting-started.md
- * SDK version:    v0.1.x (technical preview)
+ * SDK version:    v0.2.x (technical preview)
  *
  * Auth: Uses existing GitHub/Copilot CLI credentials automatically.
  * The CopilotClient picks up the local auth session. No API key required.
@@ -44,6 +44,16 @@ interface CopilotSendAndWaitResult {
   data: { content: string };
 }
 
+interface CopilotPermissionResult {
+  kind: string;
+  [key: string]: unknown;
+}
+
+type CopilotPermissionHandler = (
+  req: unknown,
+  invocation?: { sessionId: string },
+) => Promise<CopilotPermissionResult> | CopilotPermissionResult;
+
 interface CopilotSession {
   /** SDK-assigned session identifier. Persist and use with client.resumeSession(). */
   readonly sessionId: string;
@@ -52,7 +62,7 @@ interface CopilotSession {
   /** Send a prompt. Resolves when dispatch is complete; subscribe to events for the response. */
   send(options: { prompt: string }): Promise<void>;
   /** Send a prompt and wait for the complete response. */
-  sendAndWait(options: { prompt: string }): Promise<CopilotSendAndWaitResult | null>;
+  sendAndWait(options: { prompt: string }, timeout?: number): Promise<CopilotSendAndWaitResult | null>;
   /** Subscribe to all events or a specific event type. Returns an unsubscribe function. */
   on(handler: SessionEventHandler): () => void;
   on(eventType: string, handler: SessionEventHandler): () => void;
@@ -71,14 +81,14 @@ interface CopilotClientApi {
     sessionId?: string;
     streaming?: boolean;
     infiniteSessions?: { enabled?: boolean };
-    onPermissionRequest: (req: unknown) => Promise<boolean | string>;
+    onPermissionRequest: CopilotPermissionHandler;
     systemMessage?: { content: string };
   }): Promise<CopilotSession>;
   /** Resume a previously created session by its sessionId. */
   resumeSession(sessionId: string, config: {
     model?: string;
     streaming?: boolean;
-    onPermissionRequest: (req: unknown) => Promise<boolean | string>;
+    onPermissionRequest: CopilotPermissionHandler;
   }): Promise<CopilotSession>;
 }
 
@@ -96,11 +106,15 @@ export class CopilotAdapter implements ProviderAdapter {
   readonly provider = "copilot";
 
   private sessions = new Map<string, CopilotSessionMeta>();
+  private permissionHandler: CopilotPermissionHandler = () => ({ kind: "approved" });
 
   private async createClient(): Promise<CopilotClientApi> {
     try {
       // @ts-ignore — optional peer dependency, dynamically imported
-      const { CopilotClient } = await import("@github/copilot-sdk");
+      const { CopilotClient, approveAll } = await import("@github/copilot-sdk");
+      if (typeof approveAll === "function") {
+        this.permissionHandler = approveAll as CopilotPermissionHandler;
+      }
       return new CopilotClient() as unknown as CopilotClientApi;
     } catch {
       throw new Error(
@@ -109,8 +123,15 @@ export class CopilotAdapter implements ProviderAdapter {
     }
   }
 
-  private async approveAll(_req: unknown): Promise<boolean> {
-    return true;
+  private resolveSendTimeoutMs(requested?: number): number {
+    if (Number.isFinite(requested) && (requested as number) >= 100) {
+      return Math.floor(requested as number);
+    }
+    const envValue = Number(process.env.FLOE_COPILOT_SEND_TIMEOUT_MS ?? "");
+    if (Number.isFinite(envValue) && envValue >= 100) {
+      return Math.floor(envValue);
+    }
+    return 30 * 60_000;
   }
 
   private generateId(): string {
@@ -139,7 +160,7 @@ export class CopilotAdapter implements ProviderAdapter {
 
     const copilotSession = await client.createSession({
       streaming: true,
-      onPermissionRequest: this.approveAll,
+      onPermissionRequest: this.permissionHandler,
       ...(systemMessage ? { systemMessage } : {}),
       ...(config.model ? { model: config.model } : {}),
     });
@@ -198,7 +219,7 @@ export class CopilotAdapter implements ProviderAdapter {
     const storedModel = storedSession.metadata?.model as string | undefined;
     const copilotSession = await client.resumeSession(copilotSessionId, {
       streaming: true,
-      onPermissionRequest: this.approveAll,
+      onPermissionRequest: this.permissionHandler,
       ...(storedModel ? { model: storedModel } : {}),
     });
 
@@ -213,7 +234,7 @@ export class CopilotAdapter implements ProviderAdapter {
     if (roleContent) {
       await copilotSession.sendAndWait({
         prompt: `[System context — resumed session. Your role definition follows.]\n\n${roleContent}\n\nReply with only: "Ready."`,
-      }).catch(() => {
+      }, this.resolveSendTimeoutMs()).catch(() => {
         // Best-effort: if re-injection fails, the session still works
       });
     }
@@ -237,13 +258,16 @@ export class CopilotAdapter implements ProviderAdapter {
   async sendMessage(
     sessionId: string,
     message: string,
-    _options?: SendOptions
+    options?: SendOptions
   ): Promise<MessageResult> {
     const meta = this.sessions.get(sessionId);
     if (!meta) throw new Error(`Copilot session not found: ${sessionId}`);
 
     // Use sendAndWait() for non-streaming — cleaner than manual event subscription
-    const response = await meta.copilotSession.sendAndWait({ prompt: message });
+    const response = await meta.copilotSession.sendAndWait(
+      { prompt: message },
+      this.resolveSendTimeoutMs(options?.timeoutMs),
+    );
     const content = response?.data?.content ?? "";
 
     meta.session.lastMessageAt = this.now();
