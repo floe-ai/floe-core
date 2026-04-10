@@ -332,6 +332,26 @@ export class FeatureWorkflowEngine {
    * The implementer is now in "waiting" state (set by call.blocking in service.ts).
    */
   private async dispatchApproachReview(state: FeatureWorkflowState, callId?: string): Promise<void> {
+    const implNextCmd = `bun run .floe/bin/floe.ts call-blocking --run ${state.runId} --worker ${state.implWorkerId} --type request_code_review --feature ${state.featureId}`;
+    const implResubmitCmd = `bun run .floe/bin/floe.ts call-blocking --run ${state.runId} --worker ${state.implWorkerId} --type request_approach_review --feature ${state.featureId}`;
+
+    const approvedContinuation = [
+      "Approach approved. Proceed with full implementation now.",
+      "",
+      "When implementation is complete and verified, issue this call — do not stop without it:",
+      `  ${implNextCmd}`,
+    ].join("\n");
+
+    const rejectedContinuation = [
+      "Approach rejected. Revise your approach based on the review feedback.",
+      "",
+      "When you have a revised approach, re-signal for review:",
+      `  ${implResubmitCmd}`,
+    ].join("\n");
+
+    const approvedResponse = JSON.stringify({ verdict: "approved", continuation: approvedContinuation });
+    const rejectedResponse = JSON.stringify({ verdict: "rejected", continuation: rejectedContinuation, rationale: "<reason>" });
+
     const msg = [
       `The implementer has proposed an execution approach for feature "${state.featureId}".`,
       `Your run ID is "${state.runId}" and your worker ID is "${state.revWorkerId}".`,
@@ -341,10 +361,10 @@ export class FeatureWorkflowEngine {
       `  bun run .floe/scripts/review.ts get-for ${state.featureId}`,
       "",
       "Evaluate the approach. When done, resolve the blocking call:",
-      `  Approve: bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '{"verdict":"approved","continuation":"Approach approved. Proceed with implementation."}' --resolved-by reviewer`,
-      `  Reject:  bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '{"verdict":"rejected","continuation":"Approach rejected. See review for feedback.","rationale":"<reason>"}' --resolved-by reviewer`,
+      `  Approve: bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '${approvedResponse}' --resolved-by reviewer`,
+      `  Reject:  bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '${rejectedResponse}' --resolved-by reviewer`,
       "",
-      "This will automatically resume the implementer with your verdict.",
+      "This will automatically resume the implementer with your verdict and next-step instructions.",
     ].join("\n");
 
     const result = await this.sendMessage(state.revWorkerId, msg);
@@ -360,6 +380,17 @@ export class FeatureWorkflowEngine {
   private async dispatchCodeReview(state: FeatureWorkflowState, callId?: string): Promise<void> {
     state.phase = "review";
 
+    const implRevisionCmd = `bun run .floe/bin/floe.ts call-blocking --run ${state.runId} --worker ${state.implWorkerId} --type revision_ready --feature ${state.featureId}`;
+
+    const failContinuation = [
+      "Review failed. Address all findings, then signal revision complete:",
+      `  ${implRevisionCmd}`,
+      "Do not stop without issuing this call.",
+    ].join("\n");
+
+    const passResponse = JSON.stringify({ outcome: "pass", continuation: "Review passed. Feature complete — your work is done." });
+    const failResponse = JSON.stringify({ outcome: "fail", continuation: failContinuation, findings: "<details>" });
+
     const msg = [
       `The implementer has completed work on feature "${state.featureId}" and requests code review.`,
       `Your run ID is "${state.runId}" and your worker ID is "${state.revWorkerId}".`,
@@ -369,10 +400,10 @@ export class FeatureWorkflowEngine {
       `  bun run .floe/scripts/review.ts get-for ${state.featureId}`,
       "",
       "When done, resolve the blocking call:",
-      `  Pass: bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '{"outcome":"pass","continuation":"Review passed. Feature complete."}' --resolved-by reviewer`,
-      `  Fail: bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '{"outcome":"fail","continuation":"Review failed. See findings.","findings":"<details>"}' --resolved-by reviewer`,
+      `  Pass: bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '${passResponse}' --resolved-by reviewer`,
+      `  Fail: bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '${failResponse}' --resolved-by reviewer`,
       "",
-      "This will automatically resume the implementer with the review result.",
+      "This will automatically resume the implementer with next-step instructions.",
     ].join("\n");
 
     const result = await this.sendMessage(state.revWorkerId, msg);
@@ -396,6 +427,17 @@ export class FeatureWorkflowEngine {
       return;
     }
 
+    const implRevisionCmd = `bun run .floe/bin/floe.ts call-blocking --run ${state.runId} --worker ${state.implWorkerId} --type revision_ready --feature ${state.featureId}`;
+
+    const failContinuation = [
+      `Review failed again (round ${state.round}). Address all findings, then re-signal:`,
+      `  ${implRevisionCmd}`,
+      "Do not stop without issuing this call.",
+    ].join("\n");
+
+    const passResponse = JSON.stringify({ outcome: "pass", continuation: "Review passed. Feature complete — your work is done." });
+    const failResponse = JSON.stringify({ outcome: "fail", continuation: failContinuation, findings: "<details>" });
+
     const msg = [
       `The implementer has revised feature "${state.featureId}" (round ${state.round}).`,
       "",
@@ -404,8 +446,8 @@ export class FeatureWorkflowEngine {
       `  bun run .floe/scripts/review.ts get-for ${state.featureId}`,
       "",
       "Resolve the blocking call:",
-      `  Pass: bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '{"outcome":"pass","continuation":"Review passed. Feature complete."}' --resolved-by reviewer`,
-      `  Fail: bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '{"outcome":"fail","continuation":"Review failed again. See findings.","findings":"<details>"}' --resolved-by reviewer`,
+      `  Pass: bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '${passResponse}' --resolved-by reviewer`,
+      `  Fail: bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '${failResponse}' --resolved-by reviewer`,
     ].join("\n");
 
     const result = await this.sendMessage(state.revWorkerId, msg);

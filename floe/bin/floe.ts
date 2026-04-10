@@ -362,6 +362,7 @@ function buildDaemonPayload(action: string, args: Record<string, any>): Record<s
   if (args.cursor !== undefined && payload.cursor === undefined) payload.cursor = Number(args.cursor);
   if (args.limit !== undefined && payload.limit === undefined) payload.limit = Number(args.limit);
   if (args["wait-ms"] !== undefined && payload.waitMs === undefined) payload.waitMs = Number(args["wait-ms"]);
+  if (args["src-root"] !== undefined && payload.srcRoot === undefined) payload.srcRoot = args["src-root"];
   if (args.contextAddendum !== undefined && payload.contextAddendum === undefined) payload.contextAddendum = args.contextAddendum;
 
   if (args.participants !== undefined && payload.participants === undefined) {
@@ -399,6 +400,11 @@ function buildDaemonPayload(action: string, args: Record<string, any>): Record<s
   if (action === "call.blocking") {
     if (payload.callType === undefined && payload.type !== undefined) {
       payload.callType = payload.type;
+    }
+    // --feature <id> is a shorthand so callers don't need to JSON-encode --data
+    if (payload.featureId !== undefined) {
+      payload.payload = { featureId: payload.featureId, ...(payload.payload as Record<string, unknown> ?? {}) };
+      delete payload.featureId;
     }
   }
 

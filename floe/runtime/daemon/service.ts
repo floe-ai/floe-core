@@ -44,6 +44,7 @@ interface FloeConfig {
   defaultProvider: string;
   enabledProviders?: string[];
   configured?: boolean;
+  srcRoot?: string;
   roles?: {
     planner?: { provider?: string; model?: string; thinking?: string };
     implementer?: { provider?: string; model?: string; thinking?: string };
@@ -382,11 +383,13 @@ export class DaemonService {
     const run = (runResult as any).run as RunRecord;
 
     // Build implementer context addendum
+    const config = this.loadConfig();
+    const srcRoot = payload.srcRoot ?? config?.srcRoot;
     let implAddendum: string | undefined;
-    if (payload.srcRoot) {
+    if (srcRoot) {
       implAddendum = [
         "\n## Source Root\n",
-        `All application source code for the project under development must be written to the \`${payload.srcRoot}/\` directory (relative to the project root).`,
+        `All application source code for the project under development must be written to the \`${srcRoot}/\` directory (relative to the project root).`,
         `This directory has been configured as the project's source root.`,
         `Do NOT write application files into the .floe framework directory or the project root directly.`,
       ].join("\n");

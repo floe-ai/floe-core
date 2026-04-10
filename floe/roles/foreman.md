@@ -64,13 +64,18 @@ When the primary differentiating behaviour involves a **real-time user interacti
 Feature execution is daemon-native. `manage-feature-pair` tells the daemon to start both workers and drive the full alignment → implementation → review loop. No background process, no manual messaging, no polling.
 
 ```bash
-# Start
+# Start (basic)
 bun run .floe/bin/floe.ts manage-feature-pair --feature <id>
+
+# Start with source root configured (recommended for app-producing features)
+bun run .floe/bin/floe.ts manage-feature-pair --feature <id> --src-root src
 
 # Observe
 bun run .floe/bin/floe.ts events-subscribe --run <runId> --wait-ms 60000
 bun run .floe/bin/floe.ts run-get --run <runId>
 ```
+
+**`--src-root <dir>`**: Tells the implementer where to write application code (e.g. `src`, `app`). Without this, application files may land in the project root. Set `"srcRoot": "src"` in `.floe/config.json` to avoid passing this flag every time.
 
 **Key events:**
 - `call.pending` — worker waiting for another participant

@@ -29,14 +29,14 @@ You coordinate with other participants through the daemon's blocking-call system
 
 | When | Call |
 |------|------|
-| Approach ready for review | `call-blocking --type request_approach_review --data '{"featureId":"<id>"}'` |
-| Implementation ready for code review | `call-blocking --type request_code_review --data '{"featureId":"<id>"}'` |
-| Review findings fixed, ready for re-review | `call-blocking --type revision_ready --data '{"featureId":"<id>"}'` |
+| Approach ready for review | `call-blocking --type request_approach_review --feature <featureId>` |
+| Implementation ready for code review | `call-blocking --type request_code_review --feature <featureId>` |
+| Review findings fixed, ready for re-review | `call-blocking --type revision_ready --feature <featureId>` |
 | Blocked by missing information from the user | `call-blocking --type request_foreman_clarification --data '{"question":"<what you need>"}'` |
 
-All calls: `bun run .floe/bin/floe.ts call-blocking --run <runId> --worker <workerId> --type <type> --data '<json>'`
+All calls: `bun run .floe/bin/floe.ts call-blocking --run <runId> --worker <workerId> --type <type> --feature <featureId>`
 
-After each blocking call, your session pauses. You are auto-resumed with the resolution.
+After each blocking call, your session pauses. You are auto-resumed with the resolution. The resumption message will include your exact next action — follow it precisely.
 
 ---
 
@@ -48,7 +48,7 @@ After each blocking call, your session pauses. You are auto-resumed with the res
 2. Read or create the rolling review: `bun run .floe/scripts/review.ts get-for <feature_id>`
 3. If a DoD is injected into your session context, read it and address each **required** criterion in your proposal.
 4. Record the proposal: `bun run .floe/scripts/review.ts set-approach <rev_id> '<proposal>'`
-5. Signal readiness: `call-blocking --type request_approach_review`
+5. Signal readiness: `bun run .floe/bin/floe.ts call-blocking --run <runId> --worker <workerId> --type request_approach_review --feature <featureId>`
 6. Wait. You are auto-resumed with the verdict.
 7. If rejected, revise and re-signal. Do not silently proceed.
 
@@ -63,8 +63,8 @@ This step is mandatory.
 3. Verify locally — smallest relevant check first (unit tests, type check), then broader tests.
 4. When a build pipeline is involved, verify the **compiled artefact** works — not just the source. Source tests passing is necessary but not sufficient.
 5. Write a run summary (see below).
-6. Signal readiness for code review: `call-blocking --type request_code_review`
-7. Wait. If the reviewer returns findings, fix them and signal `call-blocking --type revision_ready`. Continue until the reviewer passes.
+6. Signal readiness for code review: `bun run .floe/bin/floe.ts call-blocking --run <runId> --worker <workerId> --type request_code_review --feature <featureId>` — **do not stop without issuing this call**
+7. Wait. If the reviewer returns findings, fix them and signal `bun run .floe/bin/floe.ts call-blocking --run <runId> --worker <workerId> --type revision_ready --feature <featureId>`. Continue until the reviewer passes.
 
 ---
 
