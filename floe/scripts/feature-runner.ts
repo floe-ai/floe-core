@@ -11,13 +11,14 @@
  *   bun run scripts/feature-runner.ts run      --feature <id>   (loop until terminal)
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import {
   paths, readJson, writeJson, findArtefact,
   listArtefacts, output, ok, fail, timestamp,
 } from "./helpers.ts";
+import { sendDaemonRequest } from "../runtime/daemon/client.ts";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -45,7 +46,7 @@ const TICK_SLEEP_MS = 5_000;
 
 const p = paths();
 const stateDir = join(p.root, ".floe", "state", "feature-runs");
-const floeBin = join(p.root, ".floe", "bin", "floe.ts");
+const daemonEndpointFile = join(p.root, ".floe", "state", "daemon", "endpoint.json");
 
 function statePath(featureId: string): string {
   return join(stateDir, `${featureId}.json`);
@@ -81,28 +82,28 @@ function createEscalation(state: FeatureRunState, reasonClass: string, descripti
   });
 }
 
-function messageWorker(
+function getDaemonEndpoint(): string {
+  try {
+    if (existsSync(daemonEndpointFile)) {
+      const data = JSON.parse(readFileSync(daemonEndpointFile, "utf-8"));
+      if (data.endpoint) return data.endpoint as string;
+    }
+  } catch {}
+  return join(p.root, ".floe", "state", "daemon", "floe-daemon.sock");
+}
+
+async function sendToWorker(
   sessionId: string,
   message: string,
-  extraFlags: string[] = [],
-): { ok: boolean; content?: string; error?: string } {
-  const args = [
-    "run", floeBin, "message-worker",
-    "--session", sessionId,
-    "--message", message,
-    ...extraFlags,
-  ];
-  const proc = Bun.spawnSync(["bun", ...args], {
-    cwd: p.root,
-    env: { ...process.env },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const raw = proc.stdout.toString().trim();
+): Promise<{ ok: boolean; content?: string; error?: string }> {
+  const endpoint = getDaemonEndpoint();
   try {
-    return JSON.parse(raw);
-  } catch {
-    return { ok: false, error: raw || proc.stderr.toString().trim() || "message-worker returned no output" };
+    const response = await sendDaemonRequest(endpoint, "route.send", { to: sessionId, message });
+    if (!response.ok) return { ok: false, error: (response as any).error ?? "daemon returned not-ok" };
+    const result = (response as any).result as Record<string, any> | undefined;
+    return { ok: true, content: result?.content ?? "" };
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "daemon call failed" };
   }
 }
 
@@ -171,7 +172,7 @@ function gitCommitAndPush(message: string): void {
 
 // ── Phase handlers (each tick does ONE action) ───────────────────────
 
-function tickAlignment(state: FeatureRunState): void {
+async function tickAlignment(state: FeatureRunState): Promise<void> {
   if (state.lastAction === "") {
     // Ask implementer to read the feature and propose approach
     const msg = [
@@ -182,7 +183,7 @@ function tickAlignment(state: FeatureRunState): void {
       `Read or create the review: bun run .floe/scripts/review.ts get-for ${state.featureId}.`,
     ].join(" ");
 
-    const result = messageWorker(state.implSessionId, msg, ["--force-no-alignment"]);
+    const result = await sendToWorker(state.implSessionId, msg);
     state.lastAction = "messaged-implementer-propose";
     state.lastActionResult = result.ok
       ? "implementer messaged to propose approach"
@@ -215,7 +216,7 @@ function tickAlignment(state: FeatureRunState): void {
       `Reject via: bun run .floe/scripts/review.ts reject-approach ${review.id} '<rationale>'.`,
     ].join(" ");
 
-    const result = messageWorker(state.revSessionId, msg);
+    const result = await sendToWorker(state.revSessionId, msg);
     state.lastAction = "messaged-reviewer-evaluate";
     state.lastActionResult = result.ok
       ? "reviewer messaged to evaluate approach"
@@ -262,7 +263,7 @@ function tickAlignment(state: FeatureRunState): void {
   }
 }
 
-function tickResolution(state: FeatureRunState): void {
+async function tickResolution(state: FeatureRunState): Promise<void> {
   if (state.lastAction === "read-verdict" || state.lastAction === "messaged-reviewer-evaluate") {
     const review = getReviewForFeature(state.featureId);
     if (!review) {
@@ -278,7 +279,7 @@ function tickResolution(state: FeatureRunState): void {
       `bun run .floe/scripts/review.ts add-resolution ${review.id} --from implementer --kind revised_approach '<revised approach>'.`,
     ].join(" ");
 
-    const result = messageWorker(state.implSessionId, msg, ["--force-no-alignment"]);
+    const result = await sendToWorker(state.implSessionId, msg);
     state.lastAction = "messaged-implementer-revise";
     state.lastActionResult = result.ok
       ? "implementer messaged to revise approach"
@@ -303,7 +304,7 @@ function tickResolution(state: FeatureRunState): void {
       `If fundamentally unresolvable, set verdict to escalated.`,
     ].join(" ");
 
-    const result = messageWorker(state.revSessionId, msg);
+    const result = await sendToWorker(state.revSessionId, msg);
     state.lastAction = "messaged-reviewer-reevaluate";
     state.lastActionResult = result.ok
       ? "reviewer messaged to re-evaluate"
@@ -356,7 +357,7 @@ function tickResolution(state: FeatureRunState): void {
   }
 }
 
-function tickImplementation(state: FeatureRunState): void {
+async function tickImplementation(state: FeatureRunState): Promise<void> {
   if (state.lastAction !== "messaged-implementer-implement" && state.lastAction !== "messaged-implementer-status-check") {
     const msg = [
       "Your approach is approved. Implement the feature now.",
@@ -367,7 +368,7 @@ function tickImplementation(state: FeatureRunState): void {
       "Take all the time you need.",
     ].join(" ");
 
-    const result = messageWorker(state.implSessionId, msg);
+    const result = await sendToWorker(state.implSessionId, msg);
     state.lastAction = "messaged-implementer-implement";
     state.lastActionResult = result.ok
       ? "implementer messaged to implement"
@@ -416,7 +417,7 @@ function tickImplementation(state: FeatureRunState): void {
 
     // First check — ask for status
     const msg = "What is your implementation status? If done, remember to update the feature execution_state to ready_for_review.";
-    const result = messageWorker(state.implSessionId, msg);
+    const result = await sendToWorker(state.implSessionId, msg);
     state.lastAction = "messaged-implementer-status-check";
     state.lastActionResult = result.ok
       ? "asked implementer for completion status"
@@ -426,7 +427,7 @@ function tickImplementation(state: FeatureRunState): void {
   }
 }
 
-function tickReview(state: FeatureRunState): void {
+async function tickReview(state: FeatureRunState): Promise<void> {
   if (state.lastAction !== "messaged-reviewer-review" && state.lastAction !== "messaged-implementer-fix") {
     const review = getReviewForFeature(state.featureId);
     if (!review) {
@@ -442,7 +443,7 @@ function tickReview(state: FeatureRunState): void {
       `Set outcome via: bun run .floe/scripts/review.ts set-outcome ${review.id} <pass|fail|blocked|needs_replan>.`,
     ].join(" ");
 
-    const result = messageWorker(state.revSessionId, msg);
+    const result = await sendToWorker(state.revSessionId, msg);
     state.lastAction = "messaged-reviewer-review";
     state.lastActionResult = result.ok
       ? "reviewer messaged to review implementation"
@@ -489,7 +490,7 @@ function tickReview(state: FeatureRunState): void {
           "Fix these issues and signal completion by updating execution_state to ready_for_review again.",
         ].filter(Boolean).join(" ");
 
-        const result = messageWorker(state.implSessionId, msg);
+        const result = await sendToWorker(state.implSessionId, msg);
         state.round++;
         state.lastAction = "messaged-implementer-fix";
         state.lastActionResult = result.ok
@@ -548,21 +549,21 @@ function tickReview(state: FeatureRunState): void {
 
 // ── Tick dispatcher ──────────────────────────────────────────────────
 
-function tick(state: FeatureRunState): FeatureRunState {
+async function tick(state: FeatureRunState): Promise<FeatureRunState> {
   if (TERMINAL_PHASES.includes(state.phase)) return state;
 
   switch (state.phase) {
     case "alignment":
-      tickAlignment(state);
+      await tickAlignment(state);
       break;
     case "resolution":
-      tickResolution(state);
+      await tickResolution(state);
       break;
     case "implementation":
-      tickImplementation(state);
+      await tickImplementation(state);
       break;
     case "review":
-      tickReview(state);
+      await tickReview(state);
       break;
   }
 
@@ -617,7 +618,7 @@ switch (cmd) {
     saveState(state);
 
     // Run first tick
-    const updated = tick(state);
+    const updated = await tick(state);
     ok(`Feature run started: ${featureId}`, {
       phase: updated.phase,
       lastAction: updated.lastAction,
@@ -641,7 +642,7 @@ switch (cmd) {
       break;
     }
 
-    const updated = tick(state);
+    const updated = await tick(state);
     ok(`Tick complete`, {
       featureId,
       phase: updated.phase,
@@ -705,7 +706,7 @@ switch (cmd) {
 
     let state = loadState(featureId);
     while (!TERMINAL_PHASES.includes(state.phase)) {
-      state = tick(state);
+      state = await tick(state);
       if (TERMINAL_PHASES.includes(state.phase)) break;
       await new Promise((resolve) => setTimeout(resolve, TICK_SLEEP_MS));
       // Re-read state from disk for restart safety
