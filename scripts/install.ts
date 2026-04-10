@@ -20,7 +20,7 @@
  * Prerequisites: bun ≥ 1.0
  */
 
-import { existsSync, mkdirSync, rmSync, cpSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, cpSync, writeFileSync, readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { createInterface } from "node:readline";
 import { homedir } from "node:os";
@@ -51,7 +51,11 @@ interface SkillSpec {
 const INSTALLABLE_SKILLS: SkillSpec[] = [
   {
     name: "floe-exec",
-    description: "Structured delivery framework. See .floe/skills/floe-exec/SKILL.md for full rules.",
+    description: "Structured delivery framework — execution runtime, CLI, and coordination model.",
+  },
+  {
+    name: "floe-preflight",
+    description: "Readiness checks, setup, bootstrap, and handoff into the Foreman role.",
   },
   {
     name: "sizing-heuristics",
@@ -144,7 +148,7 @@ function installFloeDir(projectRoot: string, force: boolean): void {
   }
 }
 
-function createThinSkillPointer(client: Client, projectRoot: string, skill: SkillSpec, force: boolean): void {
+function installSkillFullText(client: Client, projectRoot: string, skill: SkillSpec, force: boolean): void {
   const targetDir = skillTargetDir(client, projectRoot, skill.name);
   const skillMdPath = join(targetDir, "SKILL.md");
 
@@ -152,48 +156,26 @@ function createThinSkillPointer(client: Client, projectRoot: string, skill: Skil
     throw new Error(`Already exists: ${skillMdPath} (use --force to overwrite)`);
   }
 
+  // Read the canonical SKILL.md from the installed .floe/ directory
+  const canonicalPath = join(projectRoot, ".floe", "skills", skill.name, "SKILL.md");
+  if (!existsSync(canonicalPath)) {
+    throw new Error(`Canonical skill not found: ${canonicalPath}`);
+  }
+
   mkdirSync(targetDir, { recursive: true });
-
-  const content = [
-    "---",
-    `name: ${skill.name}`,
-    `description: ${skill.description}`,
-    "---",
-    "",
-    `The full skill definition is at: \`.floe/skills/${skill.name}/SKILL.md\``,
-    "",
-    "Read that file and follow it.",
-    "",
-  ].join("\n");
-
-  writeFileSync(skillMdPath, content, "utf-8");
+  const canonicalContent = readFileSync(canonicalPath, "utf-8");
+  writeFileSync(skillMdPath, canonicalContent, "utf-8");
 }
 
 function buildForemanWrapper(client: Client): string {
   const shared = [
     "You are the **Foreman** for this project's Floe execution framework.",
     "",
-    "## Canonical role definition",
+    "Your complete role definition, behaviour rules, and operational instructions are in:",
     "",
-    "Your full role definition is at: `.floe/roles/foreman.md`",
+    "  `.floe/roles/foreman.md`",
     "",
-    "Read that file now and follow it exactly.",
-    "",
-    "## First-turn ritual",
-    "",
-    "1. Read state: `bun run .floe/scripts/state.ts get`",
-    "2. Check active pointers reference real artefacts",
-    "3. Classify user message (continuation, intake, setup, interruption, brainstorming)",
-    "4. Choose mode before doing anything else",
-    "",
-    "## Hard constraints — you MUST NOT:",
-    "",
-    "- **Implement code** — you never write production code. Launch workers instead.",
-    "- **Create epics or features** — all decomposition below release is the Planner's job.",
-    "- **Decompose beyond the current routing decision** — launch the Planner, don't plan yourself.",
-    "- **Skip state read** — always read state before acting.",
-    "- **Send implementation instructions without approved alignment** — run `check-alignment` first.",
-    "- **Resolve architecture/technology decisions** — surface them to the user.",
+    "Read that file now and follow it exactly. Do not act without reading it first.",
     "",
   ];
 
@@ -380,7 +362,7 @@ async function main() {
     if (!values["yes"] && !nonInteractive && process.stdout.isTTY) {
       console.log(`\n  floe-core will be installed for:\n`);
       for (const c of clients) {
-        console.log(`    ${c.padEnd(10)}  skills → ${shortPath(skillRootDir(c, projectRoot))} (${INSTALLABLE_SKILLS.length} pointers)`);
+        console.log(`    ${c.padEnd(10)}  skills → ${shortPath(skillRootDir(c, projectRoot))} (${INSTALLABLE_SKILLS.length} skills)`);
         console.log(`    ${" ".repeat(10)}  agent → ${shortPath(agentTargetFile(c, projectRoot))}`);
       }
       console.log(`\n  Shared framework → ${shortPath(join(projectRoot, ".floe"))}`);
@@ -410,14 +392,14 @@ async function main() {
       process.exit(1);
     }
 
-    // ── Step 2: Install thin SKILL.md pointers + agents per client ────
+    // ── Step 2: Install full skill content + agent wrappers per client ──
 
     const results: { client: Client; status: string }[] = [];
 
     for (const c of clients) {
       try {
         for (const skill of INSTALLABLE_SKILLS) {
-          createThinSkillPointer(c, projectRoot, skill, force);
+          installSkillFullText(c, projectRoot, skill, force);
         }
         installAgentWrapper(c, projectRoot, force);
         results.push({ client: c, status: "ok" });

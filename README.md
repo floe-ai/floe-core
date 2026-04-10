@@ -14,7 +14,7 @@ Works with **Codex**, **Copilot CLI**, and **Claude Code** as the foreman (user-
 .floe/ (installed into your project)
   ├── bin/floe.ts           CLI entrypoint — dispatches to daemon runtime
   ├── roles/                Canonical role definitions (foreman, planner, implementer, reviewer)
-  ├── skills/               Canonical skill definitions (floe-exec, sizing-heuristics)
+  ├── skills/               Canonical skill definitions (floe-exec, floe-preflight, sizing-heuristics)
   ├── schemas/              JSON schemas for all durable artefacts
   ├── scripts/              Deterministic Bun scripts for state/artefact operations
   ├── runtime/              Daemon runtime, provider adapters, session registry
@@ -65,8 +65,8 @@ bunx github:floe-ai/floe-core
 
 This single command:
 - Copies the `.floe/` framework directory (scripts, schemas, roles, skills, runtime, CLI)
-- Installs thin skill pointers for each provider (`floe-exec`, `sizing-heuristics`)
-- Generates provider foreman wrapper files
+- Installs full skill content for each provider (`floe-exec`, `floe-preflight`, `sizing-heuristics`)
+- Generates thin provider foreman wrapper files (behaviour lives in `.floe/roles/foreman.md`)
 - Scaffolds `delivery/` and `docs/` directories
 - Creates `.floe/dod.json` when missing
 - Installs dependencies
@@ -199,15 +199,18 @@ your-project/
 │   ├── architecture/        architecture documents
 │   └── decisions/           ADRs
 ├── .github/
-│   ├── skills/floe-exec/SKILL.md          thin pointer → .floe/skills/floe-exec/SKILL.md
-│   ├── skills/sizing-heuristics/SKILL.md  thin pointer → .floe/skills/sizing-heuristics/SKILL.md
-│   └── agents/foreman.agent.md
+│   ├── skills/floe-exec/SKILL.md          full copy of canonical skill
+│   ├── skills/floe-preflight/SKILL.md     full copy of canonical skill
+│   ├── skills/sizing-heuristics/SKILL.md  full copy of canonical skill
+│   └── agents/foreman.agent.md            thin wrapper → reads .floe/roles/foreman.md
 ├── .claude/
-│   ├── skills/floe-exec/SKILL.md          thin pointer → .floe/skills/floe-exec/SKILL.md
-│   ├── skills/sizing-heuristics/SKILL.md  thin pointer → .floe/skills/sizing-heuristics/SKILL.md
-│   └── agents/foreman.md
+│   ├── skills/floe-exec/SKILL.md          full copy of canonical skill
+│   ├── skills/floe-preflight/SKILL.md     full copy of canonical skill
+│   ├── skills/sizing-heuristics/SKILL.md  full copy of canonical skill
+│   └── agents/foreman.md                  thin wrapper → reads .floe/roles/foreman.md
 ├── .agents/
-│   ├── skills/floe-exec/SKILL.md          thin pointer → .floe/skills/floe-exec/SKILL.md
-│   └── skills/sizing-heuristics/SKILL.md  thin pointer → .floe/skills/sizing-heuristics/SKILL.md
-└── AGENTS.md                        Codex foreman agent definition
+│   ├── skills/floe-exec/SKILL.md          full copy of canonical skill
+│   ├── skills/floe-preflight/SKILL.md     full copy of canonical skill
+│   └── skills/sizing-heuristics/SKILL.md  full copy of canonical skill
+└── AGENTS.md                        Codex foreman agent definition (thin wrapper)
 ```

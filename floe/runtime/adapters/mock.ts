@@ -30,8 +30,8 @@ export class MockAdapter implements ProviderAdapter {
     this.responseDelayMs = options.responseDelayMs ?? 100;
   }
 
-  private generateId(): string {
-    return `mock-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+  private generateId(role: string): string {
+    return `${role}-mock-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   }
 
   private now(): string {
@@ -43,7 +43,7 @@ export class MockAdapter implements ProviderAdapter {
   }
 
   async startSession(config: WorkerConfig): Promise<WorkerSession> {
-    const id = this.generateId();
+    const id = this.generateId(config.role);
     const now = this.now();
 
     const session: WorkerSession = {

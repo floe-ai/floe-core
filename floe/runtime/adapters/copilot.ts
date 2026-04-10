@@ -117,8 +117,8 @@ export class CopilotAdapter implements ProviderAdapter {
     }
   }
 
-  private generateId(): string {
-    return `copilot-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+  private generateId(role: string): string {
+    return `${role}-copilot-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   }
 
   private now(): string {
@@ -199,7 +199,7 @@ export class CopilotAdapter implements ProviderAdapter {
       ...(config.model ? { model: config.model } : {}),
     });
 
-    const id = this.generateId();
+    const id = this.generateId(config.role);
     const now = this.now();
 
     const session: WorkerSession = {

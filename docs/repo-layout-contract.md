@@ -17,20 +17,34 @@ Installer rule: `.floe/` in consumer repos must be derived from this tree.
 Anything outside `floe/` is repository build/support context unless explicitly documented.
 
 - `scripts/` (repo root) contains installer and packaging logic.
-- `agents/` is reference material for wrapper behavior and local development support only.
 - `docs/` contains design docs and operating notes.
 
 These directories are not copied wholesale into consumer `.floe/` installs.
 
 ## Skill Installation Contract
 
-Provider-visible skills are installed as thin pointers only.
+Provider-visible skills are installed as **full text copies** of the canonical SKILL.md.
 
 - Source of truth: `.floe/skills/<skill-name>/SKILL.md`
-- Installed pointers:
+- Installed copies (full content, not pointer stubs):
   - Codex: `.agents/skills/<skill-name>/SKILL.md`
   - Copilot: `.github/skills/<skill-name>/SKILL.md`
   - Claude: `.claude/skills/<skill-name>/SKILL.md`
+
+Installable skills: `floe-exec`, `floe-preflight`, `sizing-heuristics`.
+
+Scripts and executables referenced by skills remain canonical under `.floe/` and are **not** duplicated into provider folders.
+
+## Agent Wrapper Contract
+
+Provider agent wrappers are **thin headers only** — they identify the Foreman role and point to `.floe/roles/foreman.md`. All behavioural content lives in the canonical role file.
+
+## Session ID Contract
+
+Worker session IDs include the role as a prefix for log readability:
+
+- Format: `<role>-<provider>-<timestamp>-<random>`
+- Example: `implementer-copilot-m5x8k2-a7b3c9`
 
 ## Context Memory Contract
 

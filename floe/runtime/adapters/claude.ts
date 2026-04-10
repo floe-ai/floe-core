@@ -66,8 +66,8 @@ export class ClaudeAdapter implements ProviderAdapter {
     }
   }
 
-  private generateId(): string {
-    return `claude-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+  private generateId(role: string): string {
+    return `${role}-claude-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   }
 
   private generateSessionId(): string {
@@ -116,7 +116,7 @@ export class ClaudeAdapter implements ProviderAdapter {
   async startSession(config: WorkerConfig): Promise<WorkerSession> {
     this.ensureApiKey();
 
-    const id = this.generateId();
+    const id = this.generateId(config.role);
     const claudeSessionId = this.generateSessionId();
     const systemPrompt = this.buildSystemPrompt(config);
     const permissionMode = this.resolvePermissionMode();

@@ -119,8 +119,8 @@ export class CodexAdapter implements ProviderAdapter {
     }
   }
 
-  private generateId(): string {
-    return `codex-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+  private generateId(role: string): string {
+    return `${role}-codex-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   }
 
   private now(): string {
@@ -173,7 +173,7 @@ export class CodexAdapter implements ProviderAdapter {
     }
     const thread = client.startThread(threadOpts);
 
-    const id = this.generateId();
+    const id = this.generateId(config.role);
     const now = this.now();
 
     // thread.id is null at creation — populated after first run (thread.started event)
