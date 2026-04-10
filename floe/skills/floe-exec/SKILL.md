@@ -161,6 +161,7 @@ bun run .floe/scripts/validate.ts state             # validate runtime state
 ## Related Skills
 
 - `.floe/skills/sizing-heuristics/SKILL.md` — canonical sizing rules shared across roles
+- `.floe/skills/floe-preflight/SKILL.md` — setup, readiness checks, provider configuration, git/remote setup
 
 ## External Memory Integration
 
