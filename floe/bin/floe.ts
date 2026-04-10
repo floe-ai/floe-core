@@ -1,31 +1,43 @@
 #!/usr/bin/env bun
 /**
- * floe CLI — worker session management for the floe execution framework.
+ * floe CLI — dispatches to the daemon runtime for worker and feature management.
  *
  * Usage: bun run .floe/bin/floe.ts <command> [options]
  *
- * Commands:
+ * Feature execution (daemon-native — primary model):
+ *   manage-feature-pair  Launch implementer + reviewer pair (daemon-native workflow)
+ *   run-get              Get full run state, workers, and pending calls
+ *   events-subscribe     Block until new events arrive for a run
+ *   events-replay        Replay all events for a run
+ *   call-blocking        Issue a blocking call (workers use this to signal dependencies)
+ *   call-resolve         Resolve a pending blocking call
+ *   call-detect-orphaned Detect orphaned blocking calls
+ *
+ * Planning (worker sessions):
  *   launch-worker        Launch a new worker session (daemon-managed, optional --message)
+ *
+ * Ad-hoc worker management (manual/diagnostic):
+ *   message-worker       Send a message to an active worker (ad-hoc only)
  *   resume-worker        Resume an existing session
- *   message-worker       Send a message to an active worker (daemon-managed)
  *   get-worker-status    Get session status
- *   get-worker-result    Removed (migration: use events.subscribe)
- *   wait-worker          Removed (migration: use events.subscribe)
  *   replace-worker       Stop and re-launch a worker
  *   stop-worker          Stop a worker session
  *   list-active-workers  List all active sessions
- *   manage-feature-pair  Launch implementer + reviewer pair (daemon-native workflow)
+ *
+ * Alignment:
  *   check-alignment      Check approach alignment status for a feature
- *   feature-run-status   Removed (migration: use run.get)
- *   wait-feature-run     Removed (migration: use events.subscribe)
- *   show-dod             Show the project Definition of Done
- *   edit-dod             Open the DoD file in $EDITOR
- *   list-escalations     List escalation records (optional --status)
- *   resolve-escalation   Resolve an escalation (--escalation <id> --resolution '<text>')
+ *
+ * Configuration:
  *   configure            Set up provider defaults (flags or discovery mode)
  *   show-config          Show current provider configuration
  *   list-models          List available models for a provider
  *   update-config        Update provider/model/thinking configuration
+ *
+ * Removed (migration guidance on invocation):
+ *   get-worker-result    → use events-subscribe
+ *   wait-worker          → use events-subscribe
+ *   feature-run-status   → use run-get
+ *   wait-feature-run     → use events-subscribe
  *
  * Provider resolution order:
  *   1. --provider flag
@@ -559,7 +571,10 @@ async function messageWorker(args: Record<string, any>) {
   const stored = registry.get(args.session);
   if (!stored) return { ok: false, error: `Session not found: ${args.session}` };
 
-  // Hard alignment gate: block implementer messages when approach not approved
+  // Hard alignment gate: block ad-hoc implementer messages when approach not approved.
+  // During daemon-native feature execution (manage-feature-pair), alignment is enforced
+  // by the workflow engine via call.blocking/call.resolve — this gate only applies to
+  // manual message-worker usage.
   if (stored.role === "implementer" && stored.featureId && !args["force-no-alignment"]) {
     const alignment = getAlignmentStatus(stored.featureId, projectRoot);
     if (!alignment.hasReview || alignment.approachStatus !== "approved") {

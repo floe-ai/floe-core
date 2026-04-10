@@ -2,9 +2,9 @@
 
 A repo-local execution framework for AI coding agents.
 
-Provides structured delivery (Release → Epic → Feature) with rolling reviews, summaries, notes, and a CLI entrypoint for worker session management — all driven by machine-readable JSON files in the repo.
+Provides structured delivery (Release → Epic → Feature) with a local daemon runtime, continuation-driven worker coordination, and durable repo artefacts as source of truth.
 
-Works with **Codex**, **Copilot CLI**, and **Claude Code** as the foreman (user-facing) agent. Planner, Implementer, and Reviewer are launched as worker sessions through the floe CLI.
+Works with **Codex**, **Copilot CLI**, and **Claude Code** as the foreman (user-facing) agent. Planner, Implementer, and Reviewer run as daemon-managed worker sessions coordinated through blocking calls and auto-resume.
 
 ---
 
@@ -12,14 +12,15 @@ Works with **Codex**, **Copilot CLI**, and **Claude Code** as the foreman (user-
 
 ```
 .floe/ (installed into your project)
-  ├── bin/floe.ts           CLI entrypoint for worker management
+  ├── bin/floe.ts           CLI entrypoint — dispatches to daemon runtime
   ├── roles/                Canonical role definitions (foreman, planner, implementer, reviewer)
   ├── skills/               Canonical skill definitions (floe-exec, sizing-heuristics)
   ├── schemas/              JSON schemas for all durable artefacts
   ├── scripts/              Deterministic Bun scripts for state/artefact operations
-  ├── runtime/              Provider adapters + session registry
+  ├── runtime/              Daemon runtime, provider adapters, session registry
+  │   ├── daemon/           Daemon service, event store, feature workflow engine
   │   ├── adapters/         Codex, Claude, Copilot, Mock
-  │   └── registry.ts       Session registry → .floe/state/sessions.json
+  │   └── registry.ts      Session registry → .floe/state/sessions.json
   └── package.json          Dependencies (zod + optional provider SDKs)
 
 floe-mem (optional, separate)
@@ -33,7 +34,8 @@ Repository source-of-truth boundaries are defined in [docs/repo-layout-contract.
 | Layer | Owns |
 |-------|------|
 | **`floe-exec`** | Workflow rules, hierarchy truth, schemas, Bun scripts, canonical roles, installer |
-| **`floe CLI`** | CLI entrypoint, provider adapters, session lifecycle, worker registry |
+| **`floe daemon`** | Feature workflow engine, worker lifecycle, blocking-call ledger, event stream |
+| **`floe CLI`** | CLI entrypoint, provider adapters, daemon dispatch |
 | **`floe-mem`** | Memory retrieval (separate repo, optional) |
 
 ### Role architecture
@@ -104,24 +106,56 @@ bun run .floe/scripts/validate.ts all                       # consistency check
 bun run .floe/scripts/sessions.ts active                    # list active workers
 ```
 
-## Worker management (CLI)
+## Feature execution (daemon-native)
+
+The primary execution model is daemon-native. Workers coordinate through blocking calls and auto-resume — no manual messaging or polling required.
+
+```bash
+# Start a feature run — daemon manages the full lifecycle
+bun run .floe/bin/floe.ts manage-feature-pair --feature <id>
+
+# Observe progress via event stream (blocks until new events)
+bun run .floe/bin/floe.ts events-subscribe --run <runId> --wait-ms 60000
+
+# Check run state at any time
+bun run .floe/bin/floe.ts run-get --run <runId>
+
+# Replay all events for a run
+bun run .floe/bin/floe.ts events-replay --run <runId>
+
+# Check daemon health
+bun run .floe/bin/floe.ts runtime-status
+
+# Detect orphaned blocking calls
+bun run .floe/bin/floe.ts call-detect-orphaned --run <runId>
+```
+
+## Planning (worker sessions)
+
+```bash
+bun run .floe/bin/floe.ts launch-worker --role planner --scope <intake|release|epic> --target <id>
+bun run .floe/bin/floe.ts launch-worker --role planner --scope release --target <id> --message "<task>"
+```
+
+## Ad-hoc worker management
+
+These commands are for manual/diagnostic use — not needed during normal feature execution.
 
 ```bash
 bun run .floe/bin/floe.ts launch-worker --role implementer --feature <id>
-bun run .floe/bin/floe.ts resume-worker --session <id>
 bun run .floe/bin/floe.ts message-worker --session <id> --message "<msg>"
 bun run .floe/bin/floe.ts get-worker-status --session <id>
+bun run .floe/bin/floe.ts resume-worker --session <id>
 bun run .floe/bin/floe.ts replace-worker --session <id>
 bun run .floe/bin/floe.ts stop-worker --session <id>
 bun run .floe/bin/floe.ts list-active-workers
-bun run .floe/bin/floe.ts manage-feature-pair --feature <id>
 ```
 
 ---
 
 ## What floe-core is NOT
 
-- Not a daemon or separate runtime product
+- Not a cloud service — the daemon runs locally in your project, started on demand
 - Not a replacement for your coding agent — it runs inside it
 - Not a source of truth — `.floe/state/sessions.json` is runtime bookkeeping only; delivery artefacts are the durable truth
 - Not a workflow database
@@ -139,16 +173,19 @@ bun run .floe/bin/floe.ts manage-feature-pair --feature <id>
 ```
 your-project/
 ├── .floe/
-│   ├── bin/floe.ts          CLI entrypoint for worker management
+│   ├── bin/floe.ts          CLI entrypoint — dispatches to daemon
 │   ├── scripts/             deterministic Bun scripts
 │   ├── schemas/             JSON schemas for artefacts
 │   ├── roles/               canonical role definitions
 │   ├── skills/              canonical skill definitions
-│   ├── runtime/             provider adapters + session registry
+│   ├── runtime/
+│   │   ├── daemon/          daemon service, feature workflow engine, event store
+│   │   └── adapters/        provider adapters (Codex, Claude, Copilot)
 │   ├── dod.json             project Definition of Done
 │   ├── state/
 │   │   ├── current.json     active pointers only (gitignored)
-│   │   └── sessions.json    worker session registry (gitignored)
+│   │   ├── sessions.json    worker session registry (gitignored)
+│   │   └── events/          run event journals (gitignored)
 │   └── package.json         dependencies
 ├── delivery/
 │   ├── releases/            release artefacts

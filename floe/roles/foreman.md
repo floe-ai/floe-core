@@ -234,36 +234,55 @@ bun run .floe/scripts/init.ts --remote <url> --branch main  # specify default br
 
 Use the floe CLI to manage worker sessions. Provider configuration lives in `.floe/config.json` — it is set up automatically on first run via the pre-flight check, or can be re-run with `bun run .floe/bin/floe.ts configure`.
 
+### Feature execution (daemon-native — primary model)
+
 ```bash
-# Launch workers (provider resolved from config, env, or --provider flag)
-bun run .floe/bin/floe.ts launch-worker --role planner --scope <intake|release|epic> --target <id>
-bun run .floe/bin/floe.ts launch-worker --role planner --scope intake --target <release-id> --message "Structure these notes into a release and identify epics. Notes: ..."
-bun run .floe/bin/floe.ts launch-worker --role planner --scope <release|epic> --target <id> --message "<task>"
+# Start feature execution — daemon manages the full lifecycle
 bun run .floe/bin/floe.ts manage-feature-pair --feature <id>
 
-# Feature run observation (daemon-native)
+# Observe progress via daemon events (blocks until new events arrive)
 bun run .floe/bin/floe.ts run-get --run <runId>                            # full run state + workers + calls
 bun run .floe/bin/floe.ts events-subscribe --run <runId> --wait-ms 60000   # block until new events arrive
 bun run .floe/bin/floe.ts events-replay --run <runId>                      # replay all events for a run
+```
 
-# Send messages to workers (ad-hoc only — not needed during feature execution)
+### Planning (worker sessions)
+
+```bash
+bun run .floe/bin/floe.ts launch-worker --role planner --scope <intake|release|epic> --target <id>
+bun run .floe/bin/floe.ts launch-worker --role planner --scope intake --target <release-id> --message "Structure these notes into a release and identify epics. Notes: ..."
+bun run .floe/bin/floe.ts launch-worker --role planner --scope <release|epic> --target <id> --message "<task>"
+```
+
+### Ad-hoc worker management (manual/diagnostic only)
+
+These commands are **not needed during daemon-native feature execution**. Use them for manual planner messaging, diagnostics, or ad-hoc worker control.
+
+```bash
 bun run .floe/bin/floe.ts message-worker --session <id> --message "<msg>"
-
-# Worker lifecycle
 bun run .floe/bin/floe.ts resume-worker --session <id>
 bun run .floe/bin/floe.ts get-worker-status --session <id>
 bun run .floe/bin/floe.ts replace-worker --session <id>
 bun run .floe/bin/floe.ts stop-worker --session <id>
 bun run .floe/bin/floe.ts list-active-workers
+```
 
-# Daemon runtime
+### Daemon runtime
+
+```bash
 bun run .floe/bin/floe.ts runtime-status                                   # check daemon health
 bun run .floe/bin/floe.ts call-detect-orphaned --run <runId>               # find orphaned blocking calls
+```
 
-# Alignment
+### Alignment
+
+```bash
 bun run .floe/bin/floe.ts check-alignment --feature <id>
+```
 
-# Configuration
+### Configuration
+
+```bash
 bun run .floe/bin/floe.ts configure                                     # discovery — returns available providers + models as JSON
 bun run .floe/bin/floe.ts configure --default-provider copilot --model claude-sonnet-4  # write config directly
 bun run .floe/bin/floe.ts configure --default-provider copilot --src-root src           # set source root
@@ -288,9 +307,9 @@ Sessions survive across CLI invocations because:
 2. Provider SDKs store conversation state on disk
 3. The daemon automatically resumes sessions when needed
 
-### Launch + Task Pattern
+### Launch + Task Pattern (planning workers)
 
-When launching a worker that needs an immediate task, **always use `--message`** to combine launch and task in one call:
+When launching a planner worker that needs an immediate task, **always use `--message`** to combine launch and task in one call:
 
 ```bash
 # PREFERRED: Atomic launch + task
@@ -302,6 +321,8 @@ bun run .floe/bin/floe.ts launch-worker --role planner --scope release --target 
 # ... then later:
 bun run .floe/bin/floe.ts message-worker --session <returned-id> --message "<task>"
 ```
+
+> **Note:** For feature execution, use `manage-feature-pair` instead — the daemon manages the full lifecycle without manual messaging.
 
 ### Expected Flow: Plan Mode
 
