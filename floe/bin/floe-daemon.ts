@@ -6,6 +6,8 @@ import { dirname, join } from "node:path";
 
 import { DaemonService } from "../runtime/daemon/service.ts";
 import { DaemonServer, type ListenTarget } from "../runtime/daemon/server.ts";
+import { WaiterRegistry, WorkerConnectionRegistry } from "../runtime/daemon/worker-channel.ts";
+import type { WorkerChannelCallbacks, } from "../runtime/daemon/worker-channel.ts";
 
 function findProjectRoot(): string {
   let dir = process.cwd();
@@ -57,7 +59,46 @@ async function main(): Promise<void> {
   const service = new DaemonService(projectRoot, endpointLabel);
   await service.init();
 
-  const server = new DaemonServer(service, target);
+  const waiters = new WaiterRegistry();
+  const workerConnections = new WorkerConnectionRegistry();
+
+  // Wire the WaiterRegistry into the service so callResolve can push inline.
+  service.setWaiterRegistry(waiters);
+
+  const channelCallbacks: WorkerChannelCallbacks = {
+    onHello(workerId, runId, socket) {
+      // Validate worker exists in store
+      try {
+        const worker = service.getWorkerRecord(workerId);
+        return { workerId, status: "ok" };
+      } catch {
+        return { workerId, status: "unknown_worker" };
+      }
+    },
+    async onCallBlocking(payload, requestId, socket) {
+      // Delegate to daemon service — registers call, emits events, returns callId.
+      const result = await service.handle({
+        id: requestId,
+        action: "call.blocking",
+        payload: payload as unknown as Record<string, unknown>,
+      });
+      if (!result.ok || !result.result) {
+        throw new Error(result.error ?? "call.blocking failed");
+      }
+      return (result.result as any).call?.callId as string;
+    },
+    onHeartbeat(workerId) {
+      // Update last heartbeat in worker runtime record
+      service.workerHeartbeat(workerId);
+    },
+    onDisconnect(workerId, socket) {
+      // Clean up waiters for this connection — calls become undeliverable
+      const orphanedCallIds = waiters.removeByConnection(socket);
+      service.workerDisconnected(workerId, orphanedCallIds);
+    },
+  };
+
+  const server = new DaemonServer(service, target, waiters, workerConnections, channelCallbacks);
   await server.listen();
 }
 

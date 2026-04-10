@@ -1,23 +1,24 @@
 /**
  * FeatureWorkflowEngine — continuation-driven feature lifecycle reactor.
  *
- * Runs inside the daemon process. Instead of polling artefact files on a timer,
- * it subscribes to daemon events and reacts to the call lifecycle:
+ * Runs inside the daemon process. Subscribes to daemon events and reacts
+ * to the call lifecycle:
  *
  *   1. Engine bootstraps: sends initial message to implementer
  *   2. Implementer works, then issues call.blocking (request_approach_review)
- *      call.blocking is a true blocking command — the implementer's subprocess
- *      long-polls events.subscribe and stays running until call.resolved fires.
+ *      call.blocking establishes a persistent socket connection to the daemon
+ *      and waits for push-based resolution — the worker subprocess stays alive
+ *      until the daemon pushes call.resolved over the live channel.
  *   3. Engine reacts to call.pending → dispatches reviewer
  *   4. Reviewer evaluates, issues call.resolve with verdict
- *   5. call.resolved event fires; implementer's call.blocking subprocess returns
- *      responsePayload inline — the implementer reads it and continues in the
- *      same turn. No separate wake-up or workerContinue is needed.
+ *   5. Daemon pushes call.resolved to the waiting worker over the persistent
+ *      socket channel — responsePayload is delivered inline. The implementer
+ *      reads it and continues in the same turn.
  *   6. Engine reacts to call.resolved → advances workflow state
  *   7. Repeat for implementation/review phases
  *   8. Terminal states trigger bookkeeping (git commit, feature status, epic cascade)
  *
- * Primary coordination: call.blocking (inline wait) / call.resolve
+ * Primary coordination: persistent socket channel (call.blocking → call.resolved push)
  * worker.continue is a manual/recovery fallback only — not the happy path.
  * Artefact files: durable truth for validation — not the live signalling bus
  */
@@ -369,7 +370,7 @@ export class FeatureWorkflowEngine {
       `  Approve: bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '${approvedResponse}' --resolved-by reviewer`,
       `  Reject:  bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '${rejectedResponse}' --resolved-by reviewer`,
       "",
-      "The implementer's call-blocking command is waiting for this resolution and will receive your verdict inline.",
+      "The implementer is waiting on its persistent socket channel — your resolution will be pushed to it directly.",
     ].join("\n");
 
     const result = await this.sendMessage(state.revWorkerId, msg);
@@ -408,7 +409,7 @@ export class FeatureWorkflowEngine {
       `  Pass: bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '${passResponse}' --resolved-by reviewer`,
       `  Fail: bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '${failResponse}' --resolved-by reviewer`,
       "",
-      "The implementer's call-blocking command is waiting for this resolution and will receive your verdict inline.",
+      "The implementer is waiting on its persistent socket channel — your resolution will be pushed to it directly.",
     ].join("\n");
 
     const result = await this.sendMessage(state.revWorkerId, msg);
@@ -486,7 +487,7 @@ export class FeatureWorkflowEngine {
         break;
       case CALL_TYPES.FOREMAN_CLARIFICATION:
         state.lastAction = "foreman-responded";
-        state.lastActionResult = "foreman clarification resolved — call.blocking returned inline to worker";
+        state.lastActionResult = "foreman clarification resolved — pushed to worker via persistent channel";
         this.emitProgress(state, "foreman_clarification_resolved");
         break;
     }
@@ -501,19 +502,19 @@ export class FeatureWorkflowEngine {
     if (verdict === "approved") {
       state.phase = "implementation";
       state.lastAction = "approach-approved";
-      state.lastActionResult = "approach approved — call.blocking returned inline, implementer continues in same turn";
+      state.lastActionResult = "approach approved — resolution pushed to implementer, continues in same turn";
       this.transitionRun(state, "implementing");
       this.emitProgress(state, "alignment.approved");
-      // Implementer's call.blocking received responsePayload inline.
-      // It reads the verdict and continues — no separate resume needed.
+      // Daemon pushed responsePayload to implementer over persistent socket.
+      // Implementer reads the verdict and continues — no separate resume needed.
       // After implementing, implementer issues call.blocking(request_code_review).
     } else if (verdict === "rejected") {
       state.phase = "resolution";
       state.lastAction = "approach-rejected";
-      state.lastActionResult = "approach rejected — call.blocking returned inline with feedback";
+      state.lastActionResult = "approach rejected — rejection pushed to implementer with feedback";
       this.transitionRun(state, "plan_revision");
       this.emitProgress(state, "alignment.rejected");
-      // Implementer reads rejection via call.blocking responsePayload inline.
+      // Daemon pushed rejection to implementer over persistent socket.
       // After revising, implementer re-issues call.blocking(request_approach_review).
     } else {
       this.escalate(state, "approach_deadlock",
@@ -537,10 +538,10 @@ export class FeatureWorkflowEngine {
     } else if (outcome === "fail") {
       state.phase = "review"; // stay in review cycle
       state.lastAction = "review-failed";
-      state.lastActionResult = "code review failed — call.blocking returned inline with findings";
+      state.lastActionResult = "code review failed — findings pushed to implementer";
       this.transitionRun(state, "code_revision");
       this.emitProgress(state, "review.failed");
-      // Implementer reads findings via call.blocking responsePayload inline.
+      // Daemon pushed findings to implementer over persistent socket.
       // After fixing, implementer issues call.blocking(revision_ready).
     } else {
       this.escalate(state, "review_deadlock",

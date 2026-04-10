@@ -238,3 +238,102 @@ export interface DaemonResponse {
   result?: Record<string, unknown>;
   error?: string;
 }
+
+// ── Worker Channel Protocol ──────────────────────────────────────────
+//
+// Persistent bidirectional JSON-line messages exchanged over a long-lived
+// socket connection between an active worker process and the daemon.
+// Each message is a single JSON line terminated by \n.
+
+/** Envelope for all worker channel messages. */
+export interface WorkerChannelMessage {
+  /** Unique message identifier. */
+  messageId: string;
+  /** Message type — determines payload shape. */
+  type: WorkerChannelMessageType;
+  /** Correlation ID for request/response pairs. */
+  requestId?: string;
+  /** Worker identifier. Present on all messages after hello. */
+  workerId?: string;
+  /** Run identifier where relevant. */
+  runId?: string;
+  /** Call identifier where relevant. */
+  callId?: string;
+  /** ISO-8601 timestamp. */
+  timestamp: string;
+  /** Type-specific payload. */
+  payload?: Record<string, unknown>;
+}
+
+/** All recognised message types on the worker channel. */
+export type WorkerChannelMessageType =
+  // Worker → Daemon
+  | "worker.hello"
+  | "worker.heartbeat"
+  | "worker.disconnecting"
+  | "call.blocking"
+  // Daemon → Worker
+  | "worker.hello.ack"
+  | "call.resolved"
+  | "call.cancelled"
+  | "call.timed_out"
+  | "worker.interrupt"
+  | "worker.stop"
+  | "error";
+
+/** Worker → Daemon: establish session identity. */
+export interface WorkerHelloPayload {
+  workerId: string;
+  runId?: string;
+}
+
+/** Daemon → Worker: acknowledge hello. */
+export interface WorkerHelloAckPayload {
+  workerId: string;
+  status: "ok" | "unknown_worker" | "already_connected";
+}
+
+/** Worker → Daemon: register a blocking call and wait for resolution. */
+export interface CallBlockingChannelPayload {
+  runId: string;
+  workerId: string;
+  callType: string;
+  payload?: Record<string, unknown>;
+  dependsOn?: string[];
+  resumeStrategy?: ResumeStrategy;
+  timeoutAt?: string;
+}
+
+/** Daemon → Worker: pushed when call is resolved. */
+export interface CallResolvedPush {
+  callId: string;
+  responsePayload: Record<string, unknown> | null;
+  resolvedBy: string | null;
+}
+
+/** Daemon → Worker: pushed when call is cancelled. */
+export interface CallCancelledPush {
+  callId: string;
+  reason: string;
+}
+
+/** Daemon → Worker: pushed when call times out. */
+export interface CallTimedOutPush {
+  callId: string;
+}
+
+/** Daemon → Worker: interrupt request. */
+export interface WorkerInterruptPush {
+  reason?: string;
+}
+
+/** Daemon → Worker: stop request. */
+export interface WorkerStopPush {
+  reason?: string;
+}
+
+/** Daemon → Worker: protocol error. */
+export interface WorkerChannelError {
+  message: string;
+  code?: string;
+}

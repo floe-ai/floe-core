@@ -61,7 +61,7 @@ When the primary differentiating behaviour involves a **real-time user interacti
 
 ## Execute Mode — Daemon-Native
 
-Feature execution is daemon-native. `manage-feature-pair` tells the daemon to start both workers and drive the full alignment → implementation → review loop. No background process, no manual messaging, no polling.
+Feature execution is daemon-native. `manage-feature-pair` tells the daemon to start both workers and drive the full alignment → implementation → review loop. Workers maintain persistent socket connections to the daemon — blocking calls wait for push-based resolution, not polling.
 
 ```bash
 # Start (basic)
@@ -78,8 +78,8 @@ bun run .floe/bin/floe.ts run-get --run <runId>
 **`--src-root <dir>`**: Tells the implementer where to write application code (e.g. `src`, `app`). Without this, application files may land in the project root. Set `"srcRoot": "src"` in `.floe/config.json` to avoid passing this flag every time.
 
 **Key events:**
-- `call.pending` — worker waiting for another participant
-- `call.resolved` — blocking call resolved; worker continues inline in the same turn
+- `call.pending` — worker waiting for resolution (persistent socket wait)
+- `call.resolved` — blocking call resolved; worker receives result over persistent channel and continues inline
 - `run.completed` — feature passed (outcome: "pass")
 - `run.escalated` — needs intervention
 - `run.awaiting_foreman` — worker needs your clarification (resolve via `call-resolve`)

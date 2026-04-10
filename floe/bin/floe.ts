@@ -1147,31 +1147,70 @@ function daemonCommand(action: string) {
 /**
  * True-blocking call-blocking implementation.
  *
- * Registers the blocking call with the daemon, then long-polls events.subscribe
- * until the matching call.resolved event arrives. The worker's tool-call subprocess
- * stays running the entire time — the worker never "ends its turn" and never needs
- * to be woken up afterwards. The resolution responsePayload is returned inline.
+ * Two transport modes:
+ *
+ * 1. **Persistent socket channel** (primary) — when FLOE_DAEMON_ENDPOINT is set
+ *    (i.e. running inside a worker process), uses WorkerClient to establish a
+ *    persistent connection, sends call.blocking, and waits for the daemon to push
+ *    call.resolved over the same socket. Sub-second latency.
+ *
+ * 2. **CLI polling fallback** — when no persistent channel is available (admin/
+ *    debug use), falls back to one-shot request + events.subscribe polling loop.
+ *
+ * The worker's tool-call subprocess stays running the entire time in both modes.
  */
 async function callBlockingAndWait(args: Record<string, any>): Promise<Record<string, unknown>> {
   const endpoint = await ensureDaemonRunning(args);
   const payload = buildDaemonPayload("call.blocking", args);
+  const waitMs = parsePositiveMs(args["wait-ms"]) ?? 1_800_000;
 
-  // Step 1: register the blocking call.
+  // ── Primary: persistent socket channel ────────────────────────────
+  // Use when FLOE_DAEMON_ENDPOINT is set (worker process context).
+  const channelEndpoint = process.env.FLOE_DAEMON_ENDPOINT;
+  const workerId = payload.workerId as string | undefined;
+  const runId = payload.runId as string | undefined;
+
+  if (channelEndpoint && workerId && runId) {
+    try {
+      const { WorkerClient } = await import("../runtime/daemon/worker-client.ts");
+      const client = new WorkerClient(channelEndpoint, workerId, runId);
+      await client.connect({ connectTimeoutMs: 10_000, heartbeatIntervalMs: 30_000 });
+
+      try {
+        const result = await client.callBlocking(
+          {
+            runId,
+            workerId,
+            callType: payload.callType as string,
+            payload: payload.payload as Record<string, unknown> | undefined,
+            dependsOn: payload.dependsOn as string[] | undefined,
+            resumeStrategy: payload.resumeStrategy as any,
+            timeoutAt: payload.timeoutAt as string | undefined,
+          },
+          { waitMs },
+        );
+        return result;
+      } finally {
+        client.close();
+      }
+    } catch (err: any) {
+      // If persistent channel fails, fall through to polling fallback.
+      // This handles cases where the daemon doesn't support the channel protocol yet.
+    }
+  }
+
+  // ── Fallback: one-shot CLI polling ────────────────────────────────
   const registerResp = await sendDaemonRequest(endpoint, "call.blocking", payload);
   if (!registerResp.ok) {
     return { ok: false, action: "call.blocking", endpoint, error: registerResp.error ?? "call.blocking registration failed" };
   }
 
   const callId = (registerResp.result as Record<string, any>)?.call?.callId as string | undefined;
-  const runId = payload.runId as string | undefined;
   if (!callId || !runId) {
     return { ok: false, error: "call.blocking did not return callId or runId — cannot wait for resolution" };
   }
 
-  // Step 2: long-poll until call.resolved fires for this callId.
-  // Default wait: 30 minutes (matching the session --wait-ms convention).
-  const waitMs = parsePositiveMs(args["wait-ms"]) ?? 1_800_000;
-  const pollChunkMs = 30_000; // each events.subscribe request waits up to 30 s
+  const pollChunkMs = 30_000;
   const start = Date.now();
   let cursor = 0;
 

@@ -7,6 +7,7 @@ import type { WorkerConfig, WorkerProvider, WorkerRole, WorkerSession } from "..
 import type { ProviderAdapter } from "../adapters/interface.ts";
 import { DaemonStore } from "./store.ts";
 import { FeatureWorkflowEngine } from "./feature-workflow.ts";
+import type { WaiterRegistry } from "./worker-channel.ts";
 import type {
   CallBlockingPayload,
   CallDetectOrphanedPayload,
@@ -76,6 +77,7 @@ export class DaemonService {
   private socketPath: string;
   private startedAt: string;
   private workflowEngine: FeatureWorkflowEngine;
+  private waiterRegistry: WaiterRegistry | null = null;
 
   constructor(projectRoot: string, socketPath: string) {
     this.projectRoot = projectRoot;
@@ -99,7 +101,58 @@ export class DaemonService {
 
   async init(): Promise<void> {
     await this.loadLiveAdapters();
+    // Export daemon endpoint so child processes (worker tool-call subshells) can
+    // use the persistent socket channel instead of CLI polling.
+    process.env.FLOE_DAEMON_ENDPOINT = this.socketPath;
     this.store.emitEvent({ type: "runtime.started", data: { pid: process.pid, socketPath: this.socketPath } });
+  }
+
+  /** Inject the WaiterRegistry for push-based call resolution. */
+  setWaiterRegistry(registry: WaiterRegistry): void {
+    this.waiterRegistry = registry;
+  }
+
+  /** Get a worker runtime record by workerId (used by channel callbacks). */
+  getWorkerRecord(workerId: string): WorkerRuntimeRecord {
+    const worker = this.store.getWorker(workerId);
+    if (!worker) throw new Error(`Worker not found: ${workerId}`);
+    return worker;
+  }
+
+  /** Update heartbeat timestamp for a connected worker. */
+  workerHeartbeat(workerId: string): void {
+    const worker = this.store.getWorker(workerId);
+    if (worker) {
+      this.store.upsertWorker({ ...worker, lastHeartbeatAt: nowIso(), updatedAt: nowIso() });
+    }
+  }
+
+  /** Handle worker disconnect — mark orphaned calls for grace period. */
+  workerDisconnected(workerId: string, orphanedCallIds: string[]): void {
+    const worker = this.store.getWorker(workerId);
+    if (worker && worker.state === "waiting") {
+      this.store.upsertWorker({ ...worker, state: "stalled", updatedAt: nowIso(), lastError: "channel disconnected" });
+      this.store.emitEvent({
+        type: "worker.stalled",
+        runId: worker.runId,
+        workerId,
+        data: { reason: "channel_disconnected", orphanedCallIds },
+      });
+    }
+    for (const callId of orphanedCallIds) {
+      const call = this.store.getCall(callId);
+      if (call && call.status === "pending") {
+        // Don't orphan immediately — leave pending for grace period.
+        // call.detect-orphaned will handle timeout.
+        this.store.emitEvent({
+          type: "worker.disconnected",
+          runId: call.runId,
+          workerId,
+          callId,
+          data: { reason: "channel_disconnected" },
+        });
+      }
+    }
   }
 
   async handle(request: DaemonRequest): Promise<DaemonHandleResult> {
@@ -994,17 +1047,25 @@ export class DaemonService {
       runId: resolved.runId,
       workerId: resolved.workerId,
       callId: resolved.callId,
-      // Include responsePayload in the event so call-blocking CLI can read the
-      // resolution inline (true-blocking model) without needing a separate wake-up.
+      // Include responsePayload in the event so both the persistent socket channel
+      // and the CLI polling fallback can deliver the resolution inline.
       data: { resolvedBy: payload.resolvedBy ?? null, responsePayload: payload.responsePayload ?? null },
     });
 
-    // The call-blocking CLI long-polls for call.resolved and returns the responsePayload
-    // inline to the worker. The worker reads the resolution in the same turn — no
-    // wake-up message needed. Auto-resume has been removed to avoid sending a concurrent
-    // message into an active session (the worker's turn is still in progress while
-    // call-blocking is blocked). Orphan/crash recovery is handled by call.detect-orphaned.
-    return { call: resolved, autoResumed: false, reason: "inline-resolution" };
+    // Primary path: push resolution over persistent worker channel if a live
+    // waiter exists. The worker receives it immediately — no polling, no wake-up.
+    // Fallback: CLI polling via events.subscribe (for admin/debug invocations).
+    // Recovery: worker.continue (for crash/restart/orphan scenarios).
+    let pushedViaChannel = false;
+    if (this.waiterRegistry?.has(payload.callId)) {
+      pushedViaChannel = this.waiterRegistry.resolve(
+        payload.callId,
+        payload.responsePayload ?? null,
+        payload.resolvedBy ?? null,
+      );
+    }
+
+    return { call: resolved, pushedViaChannel, reason: pushedViaChannel ? "channel-push" : "event-fallback" };
   }
 
   private async callDetectOrphaned(payload: CallDetectOrphanedPayload): Promise<Record<string, unknown>> {
