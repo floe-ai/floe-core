@@ -206,27 +206,39 @@ Available commands:
 
 | Command | When to use |
 |---------|-------------|
-| `launch-worker` | Start a Planner, Implementer, or Reviewer session |
-| `resume-worker` | Resume an existing session that is paused or was rehydrated from registry |
-| `message-worker` | Send instructions to a running worker |
-| `get-worker-status` | Check if a worker is active, idle, stopped, or failed |
+| `manage-feature-pair` | Launch Implementer + Reviewer pair — daemon handles full workflow autonomously |
+| `run-get` | Check run state (implementing, awaiting_code_review, completed, escalated) |
+| `events-subscribe` | Stream live events from a run (workflow.progress, call.pending, run.completed) |
+| `events-replay` | Replay past events for a run |
+| `call-blocking` | (Used by workers) Signal a dependency — pauses the worker until resolved |
+| `call-resolve` | (Used by workers/foreman) Resolve a blocking call — auto-resumes waiting worker |
+| `call-detect-orphaned` | Scan for timed-out or orphaned blocking calls |
+| `launch-worker` | Start a Planner, Implementer, or Reviewer session (manual use) |
+| `message-worker` | Send ad-hoc instructions to a running worker (not needed during feature execution) |
+| `get-worker-status` | Check if a worker is active, waiting, idle, stopped, or failed |
 | `replace-worker` | Stop a stuck or failing worker and launch a fresh replacement |
 | `stop-worker` | Stop a worker cleanly when done |
-| `list-active-workers` | List all running workers (optionally filter by feature) |
-| `manage-feature-pair` | Launch an Implementer + Reviewer pair for a feature in one call |
 
 Workers are identified by a `sessionId` returned when launched. All session state is persisted to `.floe/state/sessions.json`.
 
 ### Foreman workflow with CLI
 
 ```
-1. Start: bun run .floe/bin/floe.ts manage-feature-pair --feature <id>
-2. Implementer proposes approach: bun run .floe/bin/floe.ts message-worker --session <impl_id> --message "Propose your execution approach for feature <id>"
-3. Reviewer evaluates: bun run .floe/bin/floe.ts message-worker --session <rev_id> --message "Review the approach proposal on review <rev_id>"
-4. If approved: bun run .floe/bin/floe.ts message-worker --session <impl_id> --message "Approach approved. Begin implementation."
-5. Monitor: bun run .floe/bin/floe.ts get-worker-status --session <id>
-6. If stuck: bun run .floe/bin/floe.ts replace-worker --session <id>
-7. Completion: bun run .floe/bin/floe.ts stop-worker --session <id> for both after feature review passes
+1. Launch: bun run .floe/bin/floe.ts manage-feature-pair --feature <id>
+   → Returns { ok: true, runId, implementer, reviewer }
+   → Daemon bootstraps implementer and subscribes to events autonomously
+
+2. Observe: bun run .floe/bin/floe.ts events-subscribe --run <runId> --wait-ms 300000
+   → Watch for: workflow.progress, call.pending, call.resolved, run.completed, run.escalated
+
+3. Check state: bun run .floe/bin/floe.ts run-get --run <runId>
+
+4. Intervene only on escalation or foreman clarification requests.
+
+No manual worker messaging is needed during autonomous feature execution.
+The daemon drives alignment → implementation → review via blocking calls.
+Workers signal readiness via call-blocking; reviewers resolve via call-resolve.
+The daemon auto-resumes waiting workers when calls are resolved.
 ```
 
 ## Pre-Code Alignment Protocol

@@ -12,7 +12,7 @@
     },
     "source_role": {
       "type": "string",
-      "enum": ["implementer", "reviewer", "planner", "feature-runner", "daemon"],
+      "enum": ["implementer", "reviewer", "planner", "daemon"],
       "description": "Which role or system component created this escalation"
     },
     "source_session_id": {

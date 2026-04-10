@@ -162,10 +162,12 @@ Before any Implementer starts substantial coding on a feature:
 
 The alignment sequence is:
 1. Implementer proposes execution approach via `review.ts set-approach <rev_id> '<proposal>'`
-2. Reviewer evaluates and responds via `review.ts approve-approach` or `review.ts reject-approach`
-3. If rejected or escalated, surface this to the user before proceeding
+2. Implementer signals readiness via `call-blocking --type request_approach_review`
+3. Reviewer evaluates and resolves via `call-resolve` with verdict (approved/rejected)
+4. Daemon auto-resumes implementer with the verdict
+5. If rejected or escalated, surface this to the user before proceeding
 
-Do not skip this step. It is mandatory.
+During daemon-native feature execution (`manage-feature-pair`), alignment is handled automatically. This manual sequence applies only to ad-hoc worker management.
 
 ---
 
@@ -333,8 +335,11 @@ bun run .floe/bin/floe.ts run-get --run <runId>
 **Key events to watch for:**
 - `workflow.started` — engine kicked off
 - `workflow.progress` — phase transition or action taken
+- `call.pending` — a worker issued a blocking call (waiting for another participant)
+- `call.resolved` — a blocking call was resolved (worker auto-resumed)
 - `run.completed` — feature passed review (outcome: "pass")
 - `run.escalated` — feature needs intervention (read escalationReason)
+- `run.awaiting_foreman` — a worker needs your clarification (resolve via `call-resolve`)
 
 **You do NOT need to:**
 - Message workers during the autonomous loop

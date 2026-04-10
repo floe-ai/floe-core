@@ -1,22 +1,26 @@
 /**
- * FeatureWorkflowEngine — daemon-native feature lifecycle orchestrator.
+ * FeatureWorkflowEngine — continuation-driven feature lifecycle reactor.
  *
- * Replaces the external feature-runner.ts background process. Runs inside the
- * daemon process and drives the alignment → resolution → implementation → review
- * loop using call.blocking / call.resolve and daemon-owned state.
+ * Runs inside the daemon process. Instead of polling artefact files on a timer,
+ * it subscribes to daemon events and reacts to the call lifecycle:
  *
- * Workers never need an external orchestrator sending them timed ticks. Instead:
- * 1. Engine sends initial message to implementer (propose approach)
- * 2. Engine polls artefact files on a schedule to detect phase transitions
- * 3. On transition, engine sends the next message or issues a blocking call
- * 4. Workers are auto-resumed when blocking calls are resolved
- * 5. Terminal states (complete/escalated) update run record and emit events
+ *   1. Engine bootstraps: sends initial message to implementer
+ *   2. Implementer works, then issues call.blocking (request_approach_review)
+ *   3. Engine reacts to call.pending → dispatches reviewer
+ *   4. Reviewer evaluates, issues call.resolve with verdict
+ *   5. Daemon auto-resumes implementer via workerContinue()
+ *   6. Engine reacts to call.resolved → advances workflow state
+ *   7. Repeat for implementation/review phases
+ *   8. Terminal states trigger bookkeeping (git commit, feature status, epic cascade)
+ *
+ * Primary coordination: call.blocking / call.resolve / auto-resume
+ * Artefact files: durable truth for validation — not the live signalling bus
  */
 
-import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { DaemonStore } from "./store.ts";
-import type { RunRecord, WorkerRuntimeRecord, PendingCallRecord } from "./types.ts";
+import type { RunRecord, RuntimeEvent } from "./types.ts";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -45,20 +49,16 @@ export interface FeatureWorkflowState {
 }
 
 const TERMINAL_PHASES: FeaturePhase[] = ["complete", "escalated"];
-const TICK_INTERVAL_MS = 5_000;
+
+/** Call types that workers issue to signal phase transitions. */
+export const CALL_TYPES = {
+  APPROACH_REVIEW: "request_approach_review",
+  CODE_REVIEW: "request_code_review",
+  REVISION_READY: "revision_ready",
+  FOREMAN_CLARIFICATION: "request_foreman_clarification",
+} as const;
 
 // ── Artefact helpers (file I/O, no daemon dependency) ────────────────
-
-function findProjectRoot(startDir: string): string {
-  let dir = startDir;
-  for (let i = 0; i < 20; i++) {
-    if (existsSync(join(dir, ".floe"))) return dir;
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return startDir;
-}
 
 function listArtefacts(dir: string): any[] {
   if (!existsSync(dir)) return [];
@@ -78,7 +78,7 @@ function findArtefact(dir: string, id: string): any | null {
   catch { return null; }
 }
 
-function updateArtefact(dir: string, type: string, id: string, data: Record<string, any>): void {
+function updateArtefact(dir: string, _type: string, id: string, data: Record<string, any>): void {
   const file = join(dir, `${id}.json`);
   if (!existsSync(file)) return;
   try {
@@ -153,12 +153,10 @@ export class FeatureWorkflowEngine {
   private store: DaemonStore;
   private sendMessage: SendMessageFn;
   private activeWorkflows = new Map<string, FeatureWorkflowState>();
-  private timers = new Map<string, ReturnType<typeof setTimeout>>();
+  private unsubscribers = new Map<string, () => void>();
 
-  // Artefact paths
   private featuresDir: string;
   private reviewsDir: string;
-  private epicsDir: string;
 
   constructor(
     projectRoot: string,
@@ -170,13 +168,11 @@ export class FeatureWorkflowEngine {
     this.sendMessage = sendMessage;
     this.featuresDir = join(projectRoot, "delivery", "features");
     this.reviewsDir = join(projectRoot, "delivery", "reviews");
-    this.epicsDir = join(projectRoot, "delivery", "epics");
   }
 
-  /**
-   * Start a new feature workflow. Creates the state, sends the first
-   * message to the implementer, and begins the tick loop.
-   */
+  // ── Lifecycle ──────────────────────────────────────────────────────
+
+  /** Start a feature workflow. Bootstraps implementer and subscribes to events. */
   async start(
     featureId: string,
     runId: string,
@@ -190,8 +186,8 @@ export class FeatureWorkflowEngine {
       implWorkerId,
       revWorkerId,
       phase: "alignment",
-      round: 0,
-      maxRounds: 3,
+      round: 1,
+      maxRounds: 6,
       lastAction: "",
       outcome: null,
       startedAt: now,
@@ -206,8 +202,21 @@ export class FeatureWorkflowEngine {
       data: { featureId, phase: "alignment" },
     });
 
-    // Kick off the first tick (async, don't await — runs in background)
-    this.scheduleTick(runId);
+    // Subscribe to events for this run
+    const unsub = this.store.onEvent((event) => {
+      if (event.runId !== runId) return;
+      this.handleEvent(runId, event).catch((err) => {
+        const s = this.activeWorkflows.get(runId);
+        if (s) {
+          s.lastActionResult = `event handler error: ${err?.message ?? String(err)}`;
+          s.updatedAt = new Date().toISOString();
+        }
+      });
+    });
+    this.unsubscribers.set(runId, unsub);
+
+    // Bootstrap: send initial message to implementer
+    await this.bootstrap(state);
 
     return state;
   }
@@ -220,422 +229,307 @@ export class FeatureWorkflowEngine {
   /** Stop tracking a workflow (cleanup). */
   stop(runId: string): void {
     this.activeWorkflows.delete(runId);
-    const timer = this.timers.get(runId);
-    if (timer) {
-      clearTimeout(timer);
-      this.timers.delete(runId);
+    const unsub = this.unsubscribers.get(runId);
+    if (unsub) {
+      unsub();
+      this.unsubscribers.delete(runId);
     }
   }
 
-  /** Manually trigger a tick for testing. Await this to ensure the tick completes. */
-  async triggerTick(runId: string): Promise<void> {
-    await this.executeTick(runId);
+  /** Inject an event for testing (bypasses store.emitEvent, calls handleEvent directly). */
+  async injectEvent(runId: string, event: RuntimeEvent): Promise<void> {
+    await this.handleEvent(runId, event);
   }
 
-  // ── Tick loop ────────────────────────────────────────────────────
+  // ── Bootstrap ──────────────────────────────────────────────────────
 
-  private scheduleTick(runId: string): void {
-    // Clear any existing timer
-    const existing = this.timers.get(runId);
-    if (existing) clearTimeout(existing);
+  private async bootstrap(state: FeatureWorkflowState): Promise<void> {
+    const msg = [
+      `You are working on feature "${state.featureId}".`,
+      `Your run ID is "${state.runId}" and your worker ID is "${state.implWorkerId}".`,
+      "",
+      "Read the feature artefact and the project Definition of Done:",
+      `  bun run .floe/scripts/artefact.ts get feature ${state.featureId}`,
+      `  bun run .floe/scripts/review.ts get-for ${state.featureId}`,
+      "",
+      "Propose your execution approach. When ready, signal via blocking call:",
+      `  bun run .floe/bin/floe.ts call-blocking --run ${state.runId} --worker ${state.implWorkerId} --type ${CALL_TYPES.APPROACH_REVIEW} --data '{"featureId":"${state.featureId}"}'`,
+      "",
+      "This will pause your session until the reviewer responds.",
+    ].join("\n");
 
-    const state = this.activeWorkflows.get(runId);
-    if (!state || TERMINAL_PHASES.includes(state.phase)) {
-      this.timers.delete(runId);
-      return;
-    }
+    const result = await this.sendMessage(state.implWorkerId, msg);
+    state.lastAction = "bootstrap-sent";
+    state.lastActionResult = result.ok
+      ? "implementer bootstrapped — waiting for call.blocking"
+      : `bootstrap failed: ${result.error}`;
+    state.updatedAt = new Date().toISOString();
 
-    // Execute tick immediately for the first one, then schedule next
-    this.executeTick(runId).catch((err) => {
-      const s = this.activeWorkflows.get(runId);
-      if (s) {
-        s.lastActionResult = `tick error: ${err?.message ?? String(err)}`;
-        s.updatedAt = new Date().toISOString();
-      }
-    }).finally(() => {
-      const s = this.activeWorkflows.get(runId);
-      if (s && !TERMINAL_PHASES.includes(s.phase)) {
-        const timer = setTimeout(() => this.scheduleTick(runId), TICK_INTERVAL_MS);
-        this.timers.set(runId, timer);
-      } else {
-        this.timers.delete(runId);
-      }
-    });
+    this.emitProgress(state, "alignment.bootstrap_sent");
   }
 
-  private async executeTick(runId: string): Promise<void> {
+  // ── Event reactor ──────────────────────────────────────────────────
+
+  private async handleEvent(runId: string, event: RuntimeEvent): Promise<void> {
     const state = this.activeWorkflows.get(runId);
     if (!state || TERMINAL_PHASES.includes(state.phase)) return;
 
-    switch (state.phase) {
-      case "alignment":
-        await this.tickAlignment(state);
+    switch (event.type) {
+      case "call.pending":
+        await this.onCallPending(state, event);
         break;
-      case "resolution":
-        await this.tickResolution(state);
+      case "call.resolved":
+        await this.onCallResolved(state, event);
         break;
-      case "implementation":
-        await this.tickImplementation(state);
+      case "call.timed_out":
+        await this.onCallTimedOut(state, event);
         break;
-      case "review":
-        await this.tickReview(state);
+      case "call.orphaned":
+        await this.onCallOrphaned(state, event);
+        break;
+      case "worker.stalled":
+      case "worker.failed":
+        await this.onWorkerFailure(state, event);
         break;
     }
 
     state.updatedAt = new Date().toISOString();
 
-    // Check for terminal transition
     if (TERMINAL_PHASES.includes(state.phase)) {
       await this.onTerminal(state);
     }
   }
 
-  // ── Phase handlers ───────────────────────────────────────────────
+  // ── call.pending handlers ──────────────────────────────────────────
 
-  private async tickAlignment(state: FeatureWorkflowState): Promise<void> {
-    if (state.lastAction === "") {
-      const msg = [
-        "Read the feature artefact and the project Definition of Done.",
-        "Propose your execution approach via:",
-        `bun run .floe/scripts/review.ts set-approach <rev_id> '<proposal>'.`,
-        `Read the feature first: bun run .floe/scripts/artefact.ts get feature ${state.featureId}.`,
-        `Read or create the review: bun run .floe/scripts/review.ts get-for ${state.featureId}.`,
-      ].join(" ");
+  private async onCallPending(state: FeatureWorkflowState, event: RuntimeEvent): Promise<void> {
+    const callType = event.data?.callType as string | undefined;
+    if (!callType) return;
 
-      const result = await this.sendMessage(state.implWorkerId, msg);
-      state.lastAction = "messaged-implementer-propose";
-      state.lastActionResult = result.ok
-        ? "implementer messaged to propose approach"
-        : `message failed: ${result.error}`;
+    const callId = event.callId as string | undefined;
 
-      this.emitProgress(state, "alignment.propose_sent");
-      return;
-    }
-
-    if (state.lastAction === "messaged-implementer-propose") {
-      const review = this.getReviewForFeature(state.featureId);
-      if (!review) {
-        state.lastActionResult = "no review artefact found yet — will retry";
-        return;
-      }
-
-      const ap = review.approach_proposal;
-      if (!ap || ap.verdict !== "pending") {
-        state.lastActionResult = "approach proposal not found or not pending — will retry";
-        return;
-      }
-
-      const msg = [
-        "The implementer has proposed an execution approach.",
-        "Read the review and evaluate.",
-        `Approve via: bun run .floe/scripts/review.ts approve-approach ${review.id} '<rationale>'.`,
-        `Reject via: bun run .floe/scripts/review.ts reject-approach ${review.id} '<rationale>'.`,
-      ].join(" ");
-
-      const result = await this.sendMessage(state.revWorkerId, msg);
-      state.lastAction = "messaged-reviewer-evaluate";
-      state.lastActionResult = result.ok
-        ? "reviewer messaged to evaluate approach"
-        : `message failed: ${result.error}`;
-
-      this.emitProgress(state, "alignment.evaluate_sent");
-      return;
-    }
-
-    if (state.lastAction === "messaged-reviewer-evaluate") {
-      const review = this.getReviewForFeature(state.featureId);
-      if (!review?.approach_proposal) {
-        state.lastActionResult = "review or approach proposal missing — will retry";
-        return;
-      }
-
-      const verdict = review.approach_proposal.verdict;
-      if (verdict === "pending") {
-        state.lastActionResult = "verdict still pending — will retry";
-        return;
-      }
-
-      if (verdict === "approved") {
-        state.phase = "implementation";
-        state.round = 1;
-        state.lastAction = "";
-        state.lastActionResult = "approach approved — moving to implementation";
-        this.transitionRun(state, "implementing");
-      } else if (verdict === "rejected") {
-        state.phase = "resolution";
-        state.round = 1;
-        state.lastAction = "read-verdict";
-        state.lastActionResult = "approach rejected — entering resolution";
-        this.transitionRun(state, "code_revision");
-      } else if (verdict === "escalated") {
-        this.escalate(state, "approach_deadlock",
-          review.approach_proposal.verdict_rationale ?? "approach escalated by reviewer", review.id);
-      }
-      return;
+    switch (callType) {
+      case CALL_TYPES.APPROACH_REVIEW:
+        await this.dispatchApproachReview(state, callId);
+        break;
+      case CALL_TYPES.CODE_REVIEW:
+        await this.dispatchCodeReview(state, callId);
+        break;
+      case CALL_TYPES.REVISION_READY:
+        await this.dispatchRevisionReady(state, callId);
+        break;
+      case CALL_TYPES.FOREMAN_CLARIFICATION:
+        // run.awaiting_foreman event already emitted by service.ts callBlocking()
+        state.lastAction = "awaiting-foreman";
+        state.lastActionResult = "waiting for foreman to resolve clarification";
+        this.emitProgress(state, "awaiting_foreman");
+        break;
     }
   }
 
-  private async tickResolution(state: FeatureWorkflowState): Promise<void> {
-    if (state.lastAction === "read-verdict" || state.lastAction === "messaged-reviewer-evaluate") {
-      const review = this.getReviewForFeature(state.featureId);
-      if (!review) {
-        state.lastActionResult = "no review found — will retry";
-        return;
-      }
+  /**
+   * Implementer signalled request_approach_review — dispatch to reviewer.
+   * The implementer is now in "waiting" state (set by call.blocking in service.ts).
+   */
+  private async dispatchApproachReview(state: FeatureWorkflowState, callId?: string): Promise<void> {
+    const msg = [
+      `The implementer has proposed an execution approach for feature "${state.featureId}".`,
+      `Your run ID is "${state.runId}" and your worker ID is "${state.revWorkerId}".`,
+      "",
+      "Read the feature and review artefacts:",
+      `  bun run .floe/scripts/artefact.ts get feature ${state.featureId}`,
+      `  bun run .floe/scripts/review.ts get-for ${state.featureId}`,
+      "",
+      "Evaluate the approach. When done, resolve the blocking call:",
+      `  Approve: bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '{"verdict":"approved","continuation":"Approach approved. Proceed with implementation."}' --resolved-by reviewer`,
+      `  Reject:  bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '{"verdict":"rejected","continuation":"Approach rejected. See review for feedback.","rationale":"<reason>"}' --resolved-by reviewer`,
+      "",
+      "This will automatically resume the implementer with your verdict.",
+    ].join("\n");
 
-      const msg = [
-        "Your approach was rejected.",
-        "Read the resolution thread and the reviewer's rationale.",
-        "Revise your approach via:",
-        `bun run .floe/scripts/review.ts add-resolution ${review.id} --from implementer --kind revised_approach '<revised approach>'.`,
-      ].join(" ");
-
-      const result = await this.sendMessage(state.implWorkerId, msg);
-      state.lastAction = "messaged-implementer-revise";
-      state.lastActionResult = result.ok
-        ? "implementer messaged to revise approach"
-        : `message failed: ${result.error}`;
-
-      this.emitProgress(state, "resolution.revise_sent");
-      return;
-    }
-
-    if (state.lastAction === "messaged-implementer-revise") {
-      const review = this.getReviewForFeature(state.featureId);
-      if (!review) {
-        state.lastActionResult = "no review found — will retry";
-        return;
-      }
-
-      const msg = [
-        "The implementer has responded on the resolution thread. Read it and re-evaluate.",
-        `If the revised approach is acceptable, approve via: bun run .floe/scripts/review.ts approve-approach ${review.id} '<rationale>'.`,
-        `If still unacceptable and you want to continue resolution, add your response via:`,
-        `bun run .floe/scripts/review.ts add-resolution ${review.id} --from reviewer --kind objection '<rationale>'.`,
-        `If fundamentally unresolvable, set verdict to escalated.`,
-      ].join(" ");
-
-      const result = await this.sendMessage(state.revWorkerId, msg);
-      state.lastAction = "messaged-reviewer-reevaluate";
-      state.lastActionResult = result.ok
-        ? "reviewer messaged to re-evaluate"
-        : `message failed: ${result.error}`;
-
-      this.emitProgress(state, "resolution.reevaluate_sent");
-      return;
-    }
-
-    if (state.lastAction === "messaged-reviewer-reevaluate") {
-      const review = this.getReviewForFeature(state.featureId);
-      if (!review?.approach_proposal) {
-        state.lastActionResult = "review or approach proposal missing — will retry";
-        return;
-      }
-
-      const verdict = review.approach_proposal.verdict;
-      if (verdict === "pending") {
-        state.lastActionResult = "verdict still pending — will retry";
-        return;
-      }
-
-      if (verdict === "approved") {
-        state.phase = "implementation";
-        state.round = 1;
-        state.lastAction = "";
-        state.lastActionResult = "approach approved after resolution — moving to implementation";
-        this.transitionRun(state, "implementing");
-      } else if (verdict === "rejected") {
-        if (state.round < state.maxRounds) {
-          state.round++;
-          state.lastAction = "read-verdict";
-          state.lastActionResult = `rejection round ${state.round - 1} — retrying resolution`;
-        } else {
-          this.escalate(state, "approach_deadlock", "max resolution rounds exhausted");
-        }
-      } else if (verdict === "escalated") {
-        this.escalate(state, "approach_deadlock",
-          review.approach_proposal.verdict_rationale ?? "escalated during resolution");
-      }
-      return;
-    }
-  }
-
-  private async tickImplementation(state: FeatureWorkflowState): Promise<void> {
-    if (state.lastAction !== "messaged-implementer-implement" && state.lastAction !== "messaged-implementer-status-check") {
-      const msg = [
-        "Your approach is approved. Implement the feature now.",
-        "When done:",
-        `1) Write a run summary via bun run .floe/scripts/summary.ts create --data '...'.`,
-        `2) Update feature state: bun run .floe/scripts/artefact.ts update feature ${state.featureId}`,
-        `--data '{"execution_state":{"last_run_outcome":"ready_for_review"}}'.`,
-        "Take all the time you need.",
-      ].join(" ");
-
-      const result = await this.sendMessage(state.implWorkerId, msg);
-      state.lastAction = "messaged-implementer-implement";
-      state.lastActionResult = result.ok
-        ? "implementer messaged to implement"
-        : `message failed: ${result.error}`;
-
-      this.emitProgress(state, "implementation.implement_sent");
-      return;
-    }
-
-    const feature = findArtefact(this.featuresDir, state.featureId);
-    const execState = feature?.execution_state;
-    const lastOutcome = execState?.last_run_outcome;
-
-    if (lastOutcome === "ready_for_review") {
-      state.phase = "review";
-      state.round = 1;
-      state.lastAction = "";
-      state.lastActionResult = "implementer signaled ready_for_review — moving to review";
-      this.transitionRun(state, "awaiting_code_review");
-      return;
-    }
-
-    if (lastOutcome === "fail") {
-      this.escalate(state, "repeated_failure",
-        execState?.last_failure_class
-          ? `implementation_failure: ${execState.last_failure_class}`
-          : "implementation_failure: implementer reported failure");
-      return;
-    }
-
-    // No signal yet
-    if (state.lastAction === "messaged-implementer-status-check") {
-      this.escalate(state, "missing_context", "no completion signal from implementer");
-      return;
-    }
-
-    // First check — ask for status
-    const msg = "What is your implementation status? If done, remember to update the feature execution_state to ready_for_review.";
-    const result = await this.sendMessage(state.implWorkerId, msg);
-    state.lastAction = "messaged-implementer-status-check";
+    const result = await this.sendMessage(state.revWorkerId, msg);
+    state.lastAction = "dispatched-approach-review";
     state.lastActionResult = result.ok
-      ? "asked implementer for completion status"
-      : `status check message failed: ${result.error}`;
+      ? "reviewer dispatched to evaluate approach"
+      : `dispatch failed: ${result.error}`;
 
-    this.emitProgress(state, "implementation.status_check_sent");
+    this.emitProgress(state, "alignment.review_dispatched");
   }
 
-  private async tickReview(state: FeatureWorkflowState): Promise<void> {
-    if (state.lastAction !== "messaged-reviewer-review" && state.lastAction !== "messaged-implementer-fix") {
-      const review = this.getReviewForFeature(state.featureId);
-      if (!review) {
-        state.lastActionResult = "no review found — will retry";
-        return;
-      }
+  /** Implementer signalled request_code_review — dispatch to reviewer. */
+  private async dispatchCodeReview(state: FeatureWorkflowState, callId?: string): Promise<void> {
+    state.phase = "review";
 
-      const msg = [
-        "The implementer has completed implementation.",
-        "Review the changes against the feature acceptance criteria and the project Definition of Done.",
-        `Record findings via: bun run .floe/scripts/review.ts add-finding ${review.id} --severity <sev> --description '<text>'.`,
-        `Set outcome via: bun run .floe/scripts/review.ts set-outcome ${review.id} <pass|fail|blocked|needs_replan>.`,
-      ].join(" ");
+    const msg = [
+      `The implementer has completed work on feature "${state.featureId}" and requests code review.`,
+      `Your run ID is "${state.runId}" and your worker ID is "${state.revWorkerId}".`,
+      "",
+      "Review the implementation against the feature requirements and DoD:",
+      `  bun run .floe/scripts/artefact.ts get feature ${state.featureId}`,
+      `  bun run .floe/scripts/review.ts get-for ${state.featureId}`,
+      "",
+      "When done, resolve the blocking call:",
+      `  Pass: bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '{"outcome":"pass","continuation":"Review passed. Feature complete."}' --resolved-by reviewer`,
+      `  Fail: bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '{"outcome":"fail","continuation":"Review failed. See findings.","findings":"<details>"}' --resolved-by reviewer`,
+      "",
+      "This will automatically resume the implementer with the review result.",
+    ].join("\n");
 
-      const result = await this.sendMessage(state.revWorkerId, msg);
-      state.lastAction = "messaged-reviewer-review";
-      state.lastActionResult = result.ok
-        ? "reviewer messaged to review implementation"
-        : `message failed: ${result.error}`;
+    const result = await this.sendMessage(state.revWorkerId, msg);
+    state.lastAction = "dispatched-code-review";
+    state.lastActionResult = result.ok
+      ? "reviewer dispatched for code review"
+      : `dispatch failed: ${result.error}`;
 
-      this.emitProgress(state, "review.review_sent");
+    this.transitionRun(state, "awaiting_code_review");
+    this.emitProgress(state, "review.dispatched");
+  }
+
+  /**
+   * After a failed review, implementer revised and signals readiness.
+   * Dispatch reviewer to re-evaluate.
+   */
+  private async dispatchRevisionReady(state: FeatureWorkflowState, callId?: string): Promise<void> {
+    state.round++;
+    if (state.round > state.maxRounds) {
+      this.escalate(state, "max_rounds_exceeded", `Exceeded ${state.maxRounds} review rounds`);
       return;
     }
 
-    if (state.lastAction === "messaged-reviewer-review") {
-      const review = this.getReviewForFeature(state.featureId);
-      if (!review) {
-        state.lastActionResult = "no review found — will retry";
-        return;
-      }
+    const msg = [
+      `The implementer has revised feature "${state.featureId}" (round ${state.round}).`,
+      "",
+      "Re-review the implementation:",
+      `  bun run .floe/scripts/artefact.ts get feature ${state.featureId}`,
+      `  bun run .floe/scripts/review.ts get-for ${state.featureId}`,
+      "",
+      "Resolve the blocking call:",
+      `  Pass: bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '{"outcome":"pass","continuation":"Review passed. Feature complete."}' --resolved-by reviewer`,
+      `  Fail: bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '{"outcome":"fail","continuation":"Review failed again. See findings.","findings":"<details>"}' --resolved-by reviewer`,
+    ].join("\n");
 
-      const outcome = review.outcome;
-      if (outcome === "pending") {
-        state.lastActionResult = "review outcome still pending — will retry";
-        return;
-      }
+    const result = await this.sendMessage(state.revWorkerId, msg);
+    state.lastAction = "dispatched-re-review";
+    state.lastActionResult = result.ok
+      ? `reviewer dispatched for re-review (round ${state.round})`
+      : `dispatch failed: ${result.error}`;
 
-      if (outcome === "pass") {
-        state.phase = "complete";
-        state.outcome = "pass";
-        state.lastAction = "verified-completion";
-        state.lastActionResult = "review passed — feature complete";
-        return;
-      }
+    this.transitionRun(state, "awaiting_code_review");
+    this.emitProgress(state, "review.re_review_dispatched");
+  }
 
-      if (outcome === "fail") {
-        if (state.round < state.maxRounds) {
-          const findings = (review.findings ?? [])
-            .filter((f: any) => f.status === "open")
-            .map((f: any) => `- [${f.severity}] ${f.description}`)
-            .join("\n");
+  // ── call.resolved handlers ─────────────────────────────────────────
 
-          const msg = [
-            "The reviewer found issues with your implementation.",
-            findings ? `Findings:\n${findings}` : "",
-            "Fix these issues and signal completion by updating execution_state to ready_for_review again.",
-          ].filter(Boolean).join(" ");
+  private async onCallResolved(state: FeatureWorkflowState, event: RuntimeEvent): Promise<void> {
+    const callId = event.callId as string | undefined;
+    if (!callId) return;
 
-          const sendResult = await this.sendMessage(state.implWorkerId, msg);
-          state.round++;
-          state.lastAction = "messaged-implementer-fix";
-          state.lastActionResult = sendResult.ok
-            ? `sent findings to implementer (round ${state.round})`
-            : `message failed: ${sendResult.error}`;
+    const call = this.store.getCall(callId);
+    if (!call) return;
 
-          this.emitProgress(state, "review.fix_sent");
-        } else {
-          this.escalate(state, "repeated_failure",
-            `Max review rounds exhausted for feature ${state.featureId}`, review.id);
-        }
-        return;
-      }
+    const response = call.responsePayload ?? {};
 
-      if (outcome === "blocked") {
-        state.phase = "escalated";
-        state.outcome = "blocked";
-        state.escalationReason = "blocked";
-        state.lastActionResult = "reviewer marked feature as blocked — escalating";
-        createEscalation(this.projectRoot, state.featureId, "external_dependency",
-          `Reviewer marked feature as blocked: ${state.featureId}`, review.id);
-        return;
-      }
-
-      if (outcome === "needs_replan") {
-        state.phase = "escalated";
-        state.outcome = "needs_replan";
-        state.escalationReason = "needs_replan";
-        state.lastActionResult = "reviewer says feature needs replanning — escalating";
-        createEscalation(this.projectRoot, state.featureId, "scope_change",
-          `Feature needs replanning: ${state.featureId}`, review.id);
-        return;
-      }
-    }
-
-    if (state.lastAction === "messaged-implementer-fix") {
-      const feature = findArtefact(this.featuresDir, state.featureId);
-      const lastOutcome = feature?.execution_state?.last_run_outcome;
-
-      if (lastOutcome === "ready_for_review") {
-        state.lastAction = "";
-        state.lastActionResult = "implementer signaled ready_for_review after fix — back to review";
-        return;
-      }
-
-      state.lastActionResult = "waiting for implementer to signal ready_for_review after fix";
+    switch (call.callType) {
+      case CALL_TYPES.APPROACH_REVIEW:
+        await this.onApproachVerdictResolved(state, response);
+        break;
+      case CALL_TYPES.CODE_REVIEW:
+      case CALL_TYPES.REVISION_READY:
+        await this.onCodeReviewResolved(state, response);
+        break;
+      case CALL_TYPES.FOREMAN_CLARIFICATION:
+        state.lastAction = "foreman-responded";
+        state.lastActionResult = "foreman clarification resolved — worker auto-resumed";
+        this.emitProgress(state, "foreman_clarification_resolved");
+        break;
     }
   }
 
-  // ── Terminal handling ────────────────────────────────────────────
+  private async onApproachVerdictResolved(
+    state: FeatureWorkflowState,
+    response: Record<string, unknown>,
+  ): Promise<void> {
+    const verdict = response.verdict as string | undefined;
+
+    if (verdict === "approved") {
+      state.phase = "implementation";
+      state.lastAction = "approach-approved";
+      state.lastActionResult = "approach approved — implementer auto-resumed to implement";
+      this.transitionRun(state, "implementing");
+      this.emitProgress(state, "alignment.approved");
+      // Implementer was auto-resumed by call.resolve with the continuation.
+      // After implementing, implementer should issue call.blocking with
+      // type request_code_review.
+    } else if (verdict === "rejected") {
+      state.phase = "resolution";
+      state.lastAction = "approach-rejected";
+      state.lastActionResult = "approach rejected — implementer auto-resumed with feedback";
+      this.transitionRun(state, "plan_revision");
+      this.emitProgress(state, "alignment.rejected");
+      // Implementer auto-resumed with rejection feedback.
+      // After revising, implementer should re-issue call.blocking with
+      // type request_approach_review.
+    } else {
+      this.escalate(state, "approach_deadlock",
+        `unexpected verdict: ${verdict ?? "none"}`);
+    }
+  }
+
+  private async onCodeReviewResolved(
+    state: FeatureWorkflowState,
+    response: Record<string, unknown>,
+  ): Promise<void> {
+    const outcome = response.outcome as string | undefined;
+
+    if (outcome === "pass") {
+      state.phase = "complete";
+      state.outcome = "pass";
+      state.lastAction = "review-passed";
+      state.lastActionResult = "code review passed — feature complete";
+      this.emitProgress(state, "review.passed");
+      // Terminal handler will do bookkeeping (git commit, epic cascade, etc.)
+    } else if (outcome === "fail") {
+      state.phase = "review"; // stay in review cycle
+      state.lastAction = "review-failed";
+      state.lastActionResult = "code review failed — implementer auto-resumed with findings";
+      this.transitionRun(state, "code_revision");
+      this.emitProgress(state, "review.failed");
+      // Implementer auto-resumed with failure findings.
+      // After fixing, implementer should issue call.blocking with type revision_ready.
+    } else {
+      this.escalate(state, "review_deadlock",
+        `unexpected review outcome: ${outcome ?? "none"}`);
+    }
+  }
+
+  // ── Failure / timeout handlers ─────────────────────────────────────
+
+  private async onCallTimedOut(state: FeatureWorkflowState, event: RuntimeEvent): Promise<void> {
+    const callId = event.callId as string | undefined;
+    this.escalate(state, "call_timeout",
+      `blocking call ${callId ?? "unknown"} timed out`);
+  }
+
+  private async onCallOrphaned(state: FeatureWorkflowState, event: RuntimeEvent): Promise<void> {
+    const callId = event.callId as string | undefined;
+    this.escalate(state, "call_orphaned",
+      `blocking call ${callId ?? "unknown"} orphaned (worker dead)`);
+  }
+
+  private async onWorkerFailure(state: FeatureWorkflowState, event: RuntimeEvent): Promise<void> {
+    const workerId = event.workerId as string | undefined;
+    const reason = event.data?.reason as string | undefined;
+    this.escalate(state, "worker_failure",
+      `worker ${workerId ?? "unknown"} failed: ${reason ?? "unknown"}`);
+  }
+
+  // ── Terminal bookkeeping ───────────────────────────────────────────
 
   private async onTerminal(state: FeatureWorkflowState): Promise<void> {
     const run = this.store.getRun(state.runId);
     if (!run) return;
 
     if (state.outcome === "pass") {
-      // Auto-complete feature artefact
       updateArtefact(this.featuresDir, "feature", state.featureId, { status: "completed" });
       tryCompleteEpic(this.projectRoot, state.featureId);
       gitCommitAndPush(this.projectRoot, `feat(${state.featureId}): implementation complete and reviewed`);
@@ -681,16 +575,10 @@ export class FeatureWorkflowEngine {
       });
     }
 
-    // Cleanup
     this.stop(state.runId);
   }
 
   // ── Helpers ──────────────────────────────────────────────────────
-
-  private getReviewForFeature(featureId: string): any | null {
-    const reviews = listArtefacts(this.reviewsDir);
-    return reviews.find((r) => r.target_id === featureId && r.status === "open") ?? null;
-  }
 
   private escalate(state: FeatureWorkflowState, reasonClass: string, description: string, reviewId?: string): void {
     state.phase = "escalated";

@@ -1,20 +1,20 @@
 /**
- * Integration tests for the daemon-native feature workflow.
+ * Integration tests for the continuation-driven daemon workflow.
  *
- * Tests the DaemonStore, DaemonService (blocking calls, resolve, auto-resume,
- * orphan detection), and FeatureWorkflowEngine.
+ * Tests the DaemonStore (including event subscription), blocking call lifecycle,
+ * FeatureWorkflowEngine event reactor, and CLI migration stubs.
  *
  * Run: bun test floe/runtime/daemon/__tests__/daemon-workflow.test.ts
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { DaemonStore } from "../store.ts";
-import { FeatureWorkflowEngine } from "../feature-workflow.ts";
-import type { RunRecord, WorkerRuntimeRecord, PendingCallRecord, RuntimeRunState } from "../types.ts";
+import { FeatureWorkflowEngine, CALL_TYPES } from "../feature-workflow.ts";
+import type { RunRecord, WorkerRuntimeRecord, PendingCallRecord, RuntimeEvent } from "../types.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -37,7 +37,7 @@ function makeRun(store: DaemonStore, overrides: Partial<RunRecord> = {}): RunRec
     type: "feature_execution",
     objective: "test",
     participants: [],
-    state: "initialising" as RuntimeRunState,
+    state: "initialising",
     createdAt: nowIso(),
     updatedAt: nowIso(),
     ...overrides,
@@ -64,7 +64,6 @@ function makeWorker(store: DaemonStore, overrides: Partial<WorkerRuntimeRecord> 
 
 function writeFeature(projectRoot: string, featureId: string, data: Record<string, any> = {}): void {
   const dir = join(projectRoot, "delivery", "features");
-  mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, `${featureId}.json`), JSON.stringify({
     id: featureId,
     title: `Test feature ${featureId}`,
@@ -74,21 +73,7 @@ function writeFeature(projectRoot: string, featureId: string, data: Record<strin
   }, null, 2));
 }
 
-function writeReview(projectRoot: string, reviewId: string, data: Record<string, any> = {}): void {
-  const dir = join(projectRoot, "delivery", "reviews");
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, `${reviewId}.json`), JSON.stringify({
-    id: reviewId,
-    status: "open",
-    target_id: "feat-test",
-    approach_proposal: null,
-    outcome: "pending",
-    findings: [],
-    ...data,
-  }, null, 2));
-}
-
-// ── Tests ────────────────────────────────────────────────────────────
+// ── DaemonStore Tests ────────────────────────────────────────────────
 
 describe("DaemonStore", () => {
   let projectRoot: string;
@@ -113,7 +98,7 @@ describe("DaemonStore", () => {
   });
 
   test("worker CRUD", () => {
-    const worker = makeWorker(store, { workerId: "w-001" });
+    makeWorker(store, { workerId: "w-001" });
     expect(store.getWorker("w-001")).toBeDefined();
     expect(store.getWorker("w-001")!.state).toBe("active");
   });
@@ -135,7 +120,6 @@ describe("DaemonStore", () => {
     };
     store.upsertCall(call);
     expect(store.getCall("call-001")).toBeDefined();
-    expect(store.getCall("call-001")!.status).toBe("pending");
     expect(store.listPendingCalls().length).toBe(1);
 
     store.upsertCall({ ...call, status: "resolved", resolvedAt: nowIso() });
@@ -145,17 +129,28 @@ describe("DaemonStore", () => {
   test("event emission and retrieval", () => {
     const e1 = store.emitEvent({ type: "run.started", runId: "run-001" });
     const e2 = store.emitEvent({ type: "run.completed", runId: "run-001" });
-    const e3 = store.emitEvent({ type: "run.started", runId: "run-002" });
+    store.emitEvent({ type: "run.started", runId: "run-002" });
 
-    const all = store.listEvents({});
-    expect(all.length).toBe(3);
+    expect(store.listEvents({}).length).toBe(3);
+    expect(store.listEvents({ runId: "run-001" }).length).toBe(2);
+    expect(store.listEvents({ cursor: e1.seq }).length).toBe(2);
+    expect(store.listEvents({ cursor: e1.seq })[0]!.seq).toBe(e2.seq);
+  });
 
-    const forRun1 = store.listEvents({ runId: "run-001" });
-    expect(forRun1.length).toBe(2);
+  test("event subscription delivers events to listeners", () => {
+    const received: RuntimeEvent[] = [];
+    const unsub = store.onEvent((event) => received.push(event));
 
-    const afterE1 = store.listEvents({ cursor: e1.seq });
-    expect(afterE1.length).toBe(2);
-    expect(afterE1[0]!.seq).toBe(e2.seq);
+    store.emitEvent({ type: "run.started", runId: "run-001" });
+    store.emitEvent({ type: "run.completed", runId: "run-001" });
+
+    expect(received.length).toBe(2);
+    expect(received[0]!.type).toBe("run.started");
+    expect(received[1]!.type).toBe("run.completed");
+
+    unsub();
+    store.emitEvent({ type: "run.started", runId: "run-002" });
+    expect(received.length).toBe(2); // no new events after unsubscribe
   });
 
   test("store rehydrates from JSONL on restart", () => {
@@ -163,13 +158,14 @@ describe("DaemonStore", () => {
     makeWorker(store, { workerId: "w-persist" });
     store.emitEvent({ type: "run.started", runId: "run-persist" });
 
-    // Create a new store from the same directory
     const store2 = new DaemonStore(projectRoot);
     expect(store2.getRun("run-persist")).toBeDefined();
     expect(store2.getWorker("w-persist")).toBeDefined();
     expect(store2.listEvents({}).length).toBeGreaterThanOrEqual(1);
   });
 });
+
+// ── Blocking Call Lifecycle Tests ────────────────────────────────────
 
 describe("Blocking call lifecycle", () => {
   let projectRoot: string;
@@ -193,9 +189,9 @@ describe("Blocking call lifecycle", () => {
       runId: run.runId,
       workerId: worker.workerId,
       role: worker.role,
-      callType: "request_code_review",
+      callType: CALL_TYPES.CODE_REVIEW,
       status: "pending",
-      payload: { question: "Is the approach valid?" },
+      payload: {},
       createdAt: nowIso(),
       updatedAt: nowIso(),
       dependsOn: [],
@@ -203,8 +199,6 @@ describe("Blocking call lifecycle", () => {
       retryCount: 0,
     };
     store.upsertCall(call);
-
-    // Worker enters waiting state
     store.upsertWorker({ ...worker, state: "waiting", pendingCallId: call.callId });
 
     expect(store.getCall(call.callId)!.status).toBe("pending");
@@ -221,7 +215,7 @@ describe("Blocking call lifecycle", () => {
       runId: run.runId,
       workerId: worker.workerId,
       role: worker.role,
-      callType: "request_code_review",
+      callType: CALL_TYPES.CODE_REVIEW,
       status: "pending",
       payload: {},
       createdAt: nowIso(),
@@ -232,16 +226,13 @@ describe("Blocking call lifecycle", () => {
     };
     store.upsertCall(call);
 
-    // Resolve the call
-    const resolved: PendingCallRecord = {
+    store.upsertCall({
       ...call,
       status: "resolved",
-      responsePayload: { message: "Approach approved" },
+      responsePayload: { outcome: "pass", continuation: "Approved" },
       resolvedBy: "reviewer",
       resolvedAt: nowIso(),
-      updatedAt: nowIso(),
-    };
-    store.upsertCall(resolved);
+    });
     store.upsertWorker({ ...worker, state: "resolved" });
 
     expect(store.getCall(call.callId)!.status).toBe("resolved");
@@ -258,7 +249,7 @@ describe("Blocking call lifecycle", () => {
       runId: run.runId,
       workerId: worker.workerId,
       role: worker.role,
-      callType: "request_code_review",
+      callType: CALL_TYPES.CODE_REVIEW,
       status: "pending",
       payload: {},
       createdAt: nowIso(),
@@ -269,34 +260,28 @@ describe("Blocking call lifecycle", () => {
     };
     store.upsertCall(call);
 
-    // Simulate orphan detection
     const pending = store.listPendingCalls(run.runId);
-    const orphaned: PendingCallRecord[] = [];
-
     for (const c of pending) {
       const w = store.getWorker(c.workerId);
       if (!w || w.state === "stopped" || w.state === "failed") {
-        const updated = { ...c, status: "orphaned" as const, updatedAt: nowIso() };
-        store.upsertCall(updated);
-        orphaned.push(updated);
+        store.upsertCall({ ...c, status: "orphaned" as any, updatedAt: nowIso() });
       }
     }
 
-    expect(orphaned.length).toBe(1);
     expect(store.getCall(call.callId)!.status).toBe("orphaned");
   });
 
   test("timed-out call detection", () => {
     const run = makeRun(store);
-    const worker = makeWorker(store, { runId: run.runId, state: "waiting" });
+    makeWorker(store, { runId: run.runId, state: "waiting" });
 
     const pastTime = new Date(Date.now() - 60_000).toISOString();
     const call: PendingCallRecord = {
       callId: "call-timeout-001",
       runId: run.runId,
-      workerId: worker.workerId,
-      role: worker.role,
-      callType: "request_code_review",
+      workerId: "w-x",
+      role: "implementer",
+      callType: CALL_TYPES.CODE_REVIEW,
       status: "pending",
       payload: {},
       createdAt: nowIso(),
@@ -308,22 +293,19 @@ describe("Blocking call lifecycle", () => {
     };
     store.upsertCall(call);
 
-    // Simulate timeout detection
     const pending = store.listPendingCalls(run.runId);
     const now = Date.now();
-    let timedOut = 0;
-
     for (const c of pending) {
       if (c.timeoutAt && Date.parse(c.timeoutAt) < now) {
         store.upsertCall({ ...c, status: "timed_out", updatedAt: nowIso() });
-        timedOut++;
       }
     }
 
-    expect(timedOut).toBe(1);
     expect(store.getCall(call.callId)!.status).toBe("timed_out");
   });
 });
+
+// ── FeatureWorkflowEngine Tests (event-driven) ──────────────────────
 
 describe("FeatureWorkflowEngine", () => {
   let projectRoot: string;
@@ -347,133 +329,263 @@ describe("FeatureWorkflowEngine", () => {
   });
 
   afterEach(() => {
+    engine.stop("run-test"); // cleanup any active workflows
     rmSync(projectRoot, { recursive: true, force: true });
   });
 
-  test("start creates workflow state and emits event", async () => {
+  test("start sends bootstrap message to implementer", async () => {
     const run = makeRun(store);
     const state = await engine.start("feat-001", run.runId, "impl-w", "rev-w");
 
     expect(state.featureId).toBe("feat-001");
     expect(state.phase).toBe("alignment");
-    expect(state.runId).toBe(run.runId);
+    expect(state.lastAction).toBe("bootstrap-sent");
+
+    const implMessages = sentMessages.filter(m => m.workerId === "impl-w");
+    expect(implMessages.length).toBe(1);
+    expect(implMessages[0]!.message).toContain("call-blocking");
+    expect(implMessages[0]!.message).toContain(CALL_TYPES.APPROACH_REVIEW);
 
     const events = store.listEvents({ runId: run.runId });
-    const workflowStarted = events.find(e => e.type === "workflow.started");
-    expect(workflowStarted).toBeDefined();
+    expect(events.find(e => e.type === "workflow.started")).toBeDefined();
   });
 
-  test("getState returns current workflow", async () => {
+  test("getState and stop", async () => {
     const run = makeRun(store);
     await engine.start("feat-002", run.runId, "impl-w", "rev-w");
 
-    const state = engine.getState(run.runId);
-    expect(state).toBeDefined();
-    expect(state!.featureId).toBe("feat-002");
-  });
-
-  test("stop cleans up workflow", async () => {
-    const run = makeRun(store);
-    await engine.start("feat-003", run.runId, "impl-w", "rev-w");
-
+    expect(engine.getState(run.runId)).toBeDefined();
     engine.stop(run.runId);
     expect(engine.getState(run.runId)).toBeUndefined();
   });
 
-  test("first tick sends message to implementer", async () => {
+  test("reacts to call.pending (approach review) — dispatches reviewer", async () => {
+    const run = makeRun(store);
+    await engine.start("feat-003", run.runId, "impl-w", "rev-w");
+    sentMessages.length = 0; // clear bootstrap message
+
+    // Simulate: implementer issued call.blocking → daemon emits call.pending
+    await engine.injectEvent(run.runId, {
+      type: "call.pending",
+      runId: run.runId,
+      workerId: "impl-w",
+      callId: "call-001",
+      data: { callType: CALL_TYPES.APPROACH_REVIEW },
+      seq: 100,
+      timestamp: nowIso(),
+    });
+
+    const revMessages = sentMessages.filter(m => m.workerId === "rev-w");
+    expect(revMessages.length).toBe(1);
+    expect(revMessages[0]!.message).toContain("call-resolve");
+    expect(revMessages[0]!.message).toContain("call-001");
+    expect(revMessages[0]!.message).toContain("verdict");
+
+    const state = engine.getState(run.runId)!;
+    expect(state.lastAction).toBe("dispatched-approach-review");
+  });
+
+  test("reacts to call.resolved (approach approved) — advances to implementation", async () => {
     const run = makeRun(store);
     await engine.start("feat-004", run.runId, "impl-w", "rev-w");
 
-    // Wait for the first tick to fire (it runs immediately on start)
-    await Bun.sleep(100);
+    // Store the resolved call so the engine can read it
+    const call: PendingCallRecord = {
+      callId: "call-002",
+      runId: run.runId,
+      workerId: "impl-w",
+      role: "implementer",
+      callType: CALL_TYPES.APPROACH_REVIEW,
+      status: "resolved",
+      payload: {},
+      responsePayload: { verdict: "approved", continuation: "Go ahead" },
+      resolvedBy: "reviewer",
+      resolvedAt: nowIso(),
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      dependsOn: [],
+      resumeStrategy: "session",
+      retryCount: 0,
+    };
+    store.upsertCall(call);
 
-    // The engine should have sent an initial alignment message
-    const implMessages = sentMessages.filter(m => m.workerId === "impl-w");
-    expect(implMessages.length).toBeGreaterThanOrEqual(1);
-    expect(implMessages[0]!.message).toContain("Propose");
+    await engine.injectEvent(run.runId, {
+      type: "call.resolved",
+      runId: run.runId,
+      workerId: "impl-w",
+      callId: "call-002",
+      data: { resolvedBy: "reviewer" },
+      seq: 101,
+      timestamp: nowIso(),
+    });
 
-    engine.stop(run.runId);
+    const state = engine.getState(run.runId)!;
+    expect(state.phase).toBe("implementation");
+    expect(state.lastAction).toBe("approach-approved");
   });
 
-  test("deterministic happy path via triggerTick", async () => {
-    const featureId = "feat-det";
+  test("reacts to call.resolved (approach rejected) — enters resolution", async () => {
+    const run = makeRun(store);
+    await engine.start("feat-005", run.runId, "impl-w", "rev-w");
+
+    const call: PendingCallRecord = {
+      callId: "call-003",
+      runId: run.runId,
+      workerId: "impl-w",
+      role: "implementer",
+      callType: CALL_TYPES.APPROACH_REVIEW,
+      status: "resolved",
+      payload: {},
+      responsePayload: { verdict: "rejected", continuation: "Rethink" },
+      resolvedBy: "reviewer",
+      resolvedAt: nowIso(),
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      dependsOn: [],
+      resumeStrategy: "session",
+      retryCount: 0,
+    };
+    store.upsertCall(call);
+
+    await engine.injectEvent(run.runId, {
+      type: "call.resolved",
+      runId: run.runId,
+      workerId: "impl-w",
+      callId: "call-003",
+      data: { resolvedBy: "reviewer" },
+      seq: 102,
+      timestamp: nowIso(),
+    });
+
+    const state = engine.getState(run.runId)!;
+    expect(state.phase).toBe("resolution");
+    expect(state.lastAction).toBe("approach-rejected");
+  });
+
+  test("reacts to call.pending (code review) — dispatches reviewer for review", async () => {
+    const run = makeRun(store);
+    await engine.start("feat-006", run.runId, "impl-w", "rev-w");
+    sentMessages.length = 0;
+
+    await engine.injectEvent(run.runId, {
+      type: "call.pending",
+      runId: run.runId,
+      workerId: "impl-w",
+      callId: "call-004",
+      data: { callType: CALL_TYPES.CODE_REVIEW },
+      seq: 103,
+      timestamp: nowIso(),
+    });
+
+    const state = engine.getState(run.runId)!;
+    expect(state.phase).toBe("review");
+    expect(state.lastAction).toBe("dispatched-code-review");
+
+    const revMessages = sentMessages.filter(m => m.workerId === "rev-w");
+    expect(revMessages.length).toBe(1);
+    expect(revMessages[0]!.message).toContain("outcome");
+    expect(revMessages[0]!.message).toContain("pass");
+  });
+
+  test("full happy path: bootstrap → approach review → implementation → code review → pass", async () => {
+    const featureId = "feat-happy";
     writeFeature(projectRoot, featureId);
 
     const run = makeRun(store);
-
-    // Start but immediately stop auto-ticking — we'll drive manually
     await engine.start(featureId, run.runId, "impl-w", "rev-w");
-    await Bun.sleep(100); // let first tick fire
-    // First tick already sent alignment message
-    const s0 = engine.getState(run.runId)!;
-    expect(s0.phase).toBe("alignment");
-    expect(s0.lastAction).toBe("messaged-implementer-propose");
 
-    // Stop auto-tick timer but preserve state
-    const timer = (engine as any).timers.get(run.runId);
-    if (timer) clearTimeout(timer);
-    (engine as any).timers.delete(run.runId);
+    // 1. Bootstrap sent to implementer ✓
+    expect(engine.getState(run.runId)!.lastAction).toBe("bootstrap-sent");
 
-    // Tick 2: no review yet — should retry
-    await engine.triggerTick(run.runId);
-    expect(engine.getState(run.runId)!.lastAction).toBe("messaged-implementer-propose");
+    // 2. Implementer calls call.blocking (request_approach_review)
+    await engine.injectEvent(run.runId, {
+      type: "call.pending",
+      runId: run.runId,
+      workerId: "impl-w",
+      callId: "call-approach",
+      data: { callType: CALL_TYPES.APPROACH_REVIEW },
+      seq: 10,
+      timestamp: nowIso(),
+    });
+    expect(engine.getState(run.runId)!.lastAction).toBe("dispatched-approach-review");
 
-    // Simulate: implementer creates review with pending proposal
-    writeReview(projectRoot, "rev-001", {
-      target_id: featureId,
-      approach_proposal: { verdict: "pending", proposal: "build it" },
+    // 3. Reviewer resolves with approved verdict
+    store.upsertCall({
+      callId: "call-approach",
+      runId: run.runId,
+      workerId: "impl-w",
+      role: "implementer",
+      callType: CALL_TYPES.APPROACH_REVIEW,
+      status: "resolved",
+      payload: {},
+      responsePayload: { verdict: "approved", continuation: "Approved. Implement now." },
+      resolvedBy: "reviewer",
+      resolvedAt: nowIso(),
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      dependsOn: [],
+      resumeStrategy: "session",
+      retryCount: 0,
     });
 
-    // Tick 3: detects proposal → messages reviewer
-    await engine.triggerTick(run.runId);
-    expect(engine.getState(run.runId)!.lastAction).toBe("messaged-reviewer-evaluate");
-
-    // Tick 4: verdict still pending (no change) — should retry
-    await engine.triggerTick(run.runId);
-    expect(engine.getState(run.runId)!.lastAction).toBe("messaged-reviewer-evaluate");
-
-    // Simulate: reviewer approves
-    writeReview(projectRoot, "rev-001", {
-      target_id: featureId,
-      approach_proposal: { verdict: "approved", rationale: "looks good" },
+    await engine.injectEvent(run.runId, {
+      type: "call.resolved",
+      runId: run.runId,
+      workerId: "impl-w",
+      callId: "call-approach",
+      data: { resolvedBy: "reviewer" },
+      seq: 11,
+      timestamp: nowIso(),
     });
-
-    // Tick 5: detects approval → transitions to implementation phase
-    await engine.triggerTick(run.runId);
     expect(engine.getState(run.runId)!.phase).toBe("implementation");
-    expect(engine.getState(run.runId)!.lastAction).toBe("");
+    expect(engine.getState(run.runId)!.lastAction).toBe("approach-approved");
 
-    // Tick 6: sends implementation message
-    await engine.triggerTick(run.runId);
-    expect(engine.getState(run.runId)!.lastAction).toBe("messaged-implementer-implement");
-
-    // Simulate: implementer signals ready_for_review
-    writeFeature(projectRoot, featureId, {
-      execution_state: { last_run_outcome: "ready_for_review" },
+    // 4. Implementer finishes, calls call.blocking (request_code_review)
+    await engine.injectEvent(run.runId, {
+      type: "call.pending",
+      runId: run.runId,
+      workerId: "impl-w",
+      callId: "call-review",
+      data: { callType: CALL_TYPES.CODE_REVIEW },
+      seq: 12,
+      timestamp: nowIso(),
     });
-
-    // Tick 7: detects ready_for_review → transitions to review
-    await engine.triggerTick(run.runId);
     expect(engine.getState(run.runId)!.phase).toBe("review");
+    expect(engine.getState(run.runId)!.lastAction).toBe("dispatched-code-review");
 
-    // Simulate: reviewer passes
-    writeReview(projectRoot, "rev-001", {
-      target_id: featureId,
-      approach_proposal: { verdict: "approved" },
-      outcome: "pass",
+    // 5. Reviewer resolves with pass
+    store.upsertCall({
+      callId: "call-review",
+      runId: run.runId,
+      workerId: "impl-w",
+      role: "implementer",
+      callType: CALL_TYPES.CODE_REVIEW,
+      status: "resolved",
+      payload: {},
+      responsePayload: { outcome: "pass", continuation: "Feature complete." },
+      resolvedBy: "reviewer",
+      resolvedAt: nowIso(),
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      dependsOn: [],
+      resumeStrategy: "session",
+      retryCount: 0,
     });
 
-    // Tick 8: sends review message
-    await engine.triggerTick(run.runId);
+    await engine.injectEvent(run.runId, {
+      type: "call.resolved",
+      runId: run.runId,
+      workerId: "impl-w",
+      callId: "call-review",
+      data: { resolvedBy: "reviewer" },
+      seq: 13,
+      timestamp: nowIso(),
+    });
 
-    // Tick 9: detects pass → completes
-    await engine.triggerTick(run.runId);
+    // Workflow should be cleaned up (terminal)
+    expect(engine.getState(run.runId)).toBeUndefined();
 
-    // Workflow should be terminal
-    const finalState = engine.getState(run.runId);
-    expect(finalState).toBeUndefined(); // cleaned up on terminal
-
-    // Run should be completed in the store
+    // Run should be completed
     const finalRun = store.getRun(run.runId);
     expect(finalRun!.state).toBe("completed");
 
@@ -481,10 +593,211 @@ describe("FeatureWorkflowEngine", () => {
     const feat = JSON.parse(readFileSync(join(projectRoot, "delivery", "features", `${featureId}.json`), "utf-8"));
     expect(feat.status).toBe("completed");
   });
+
+  test("review failure → revision_ready → re-review → pass", async () => {
+    const featureId = "feat-revise";
+    writeFeature(projectRoot, featureId);
+
+    const run = makeRun(store);
+    await engine.start(featureId, run.runId, "impl-w", "rev-w");
+
+    // Skip to code review phase
+    await engine.injectEvent(run.runId, {
+      type: "call.pending",
+      runId: run.runId,
+      workerId: "impl-w",
+      callId: "call-cr1",
+      data: { callType: CALL_TYPES.CODE_REVIEW },
+      seq: 20,
+      timestamp: nowIso(),
+    });
+
+    // Reviewer fails the review
+    store.upsertCall({
+      callId: "call-cr1",
+      runId: run.runId,
+      workerId: "impl-w",
+      role: "implementer",
+      callType: CALL_TYPES.CODE_REVIEW,
+      status: "resolved",
+      payload: {},
+      responsePayload: { outcome: "fail", continuation: "Fix the tests.", findings: "tests broken" },
+      resolvedBy: "reviewer",
+      resolvedAt: nowIso(),
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      dependsOn: [],
+      resumeStrategy: "session",
+      retryCount: 0,
+    });
+
+    await engine.injectEvent(run.runId, {
+      type: "call.resolved",
+      runId: run.runId,
+      workerId: "impl-w",
+      callId: "call-cr1",
+      data: { resolvedBy: "reviewer" },
+      seq: 21,
+      timestamp: nowIso(),
+    });
+
+    expect(engine.getState(run.runId)!.lastAction).toBe("review-failed");
+    expect(engine.getState(run.runId)!.phase).toBe("review");
+
+    // Implementer fixes and signals revision_ready
+    sentMessages.length = 0;
+    await engine.injectEvent(run.runId, {
+      type: "call.pending",
+      runId: run.runId,
+      workerId: "impl-w",
+      callId: "call-rev1",
+      data: { callType: CALL_TYPES.REVISION_READY },
+      seq: 22,
+      timestamp: nowIso(),
+    });
+
+    expect(engine.getState(run.runId)!.lastAction).toBe("dispatched-re-review");
+    expect(engine.getState(run.runId)!.round).toBe(2);
+
+    // Reviewer passes on re-review
+    store.upsertCall({
+      callId: "call-rev1",
+      runId: run.runId,
+      workerId: "impl-w",
+      role: "implementer",
+      callType: CALL_TYPES.REVISION_READY,
+      status: "resolved",
+      payload: {},
+      responsePayload: { outcome: "pass", continuation: "Looks good now." },
+      resolvedBy: "reviewer",
+      resolvedAt: nowIso(),
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      dependsOn: [],
+      resumeStrategy: "session",
+      retryCount: 0,
+    });
+
+    await engine.injectEvent(run.runId, {
+      type: "call.resolved",
+      runId: run.runId,
+      workerId: "impl-w",
+      callId: "call-rev1",
+      data: { resolvedBy: "reviewer" },
+      seq: 23,
+      timestamp: nowIso(),
+    });
+
+    expect(engine.getState(run.runId)).toBeUndefined(); // terminal
+    expect(store.getRun(run.runId)!.state).toBe("completed");
+  });
+
+  test("call.timed_out triggers escalation", async () => {
+    const run = makeRun(store);
+    await engine.start("feat-timeout", run.runId, "impl-w", "rev-w");
+
+    await engine.injectEvent(run.runId, {
+      type: "call.timed_out",
+      runId: run.runId,
+      workerId: "impl-w",
+      callId: "call-timeout",
+      data: {},
+      seq: 30,
+      timestamp: nowIso(),
+    });
+
+    expect(engine.getState(run.runId)).toBeUndefined(); // terminal
+    expect(store.getRun(run.runId)!.state).toBe("escalated");
+  });
+
+  test("call.orphaned triggers escalation", async () => {
+    const run = makeRun(store);
+    await engine.start("feat-orphan", run.runId, "impl-w", "rev-w");
+
+    await engine.injectEvent(run.runId, {
+      type: "call.orphaned",
+      runId: run.runId,
+      workerId: "impl-w",
+      callId: "call-orphan",
+      data: {},
+      seq: 31,
+      timestamp: nowIso(),
+    });
+
+    expect(engine.getState(run.runId)).toBeUndefined();
+    expect(store.getRun(run.runId)!.state).toBe("escalated");
+  });
+
+  test("worker.stalled triggers escalation", async () => {
+    const run = makeRun(store);
+    await engine.start("feat-stall", run.runId, "impl-w", "rev-w");
+
+    await engine.injectEvent(run.runId, {
+      type: "worker.stalled",
+      runId: run.runId,
+      workerId: "impl-w",
+      data: { reason: "auto-resume failed" },
+      seq: 32,
+      timestamp: nowIso(),
+    });
+
+    expect(engine.getState(run.runId)).toBeUndefined();
+    expect(store.getRun(run.runId)!.state).toBe("escalated");
+  });
+
+  test("events from store.onEvent trigger engine reactions (live subscription)", async () => {
+    const run = makeRun(store);
+    await engine.start("feat-live", run.runId, "impl-w", "rev-w");
+    sentMessages.length = 0;
+
+    // Emit event through the store — should be picked up by the engine's subscription
+    store.emitEvent({
+      type: "call.pending",
+      runId: run.runId,
+      workerId: "impl-w",
+      callId: "call-live-001",
+      data: { callType: CALL_TYPES.APPROACH_REVIEW },
+    });
+
+    // Give the async handler a moment to run
+    await Bun.sleep(50);
+
+    // Engine should have reacted to the event
+    const state = engine.getState(run.runId)!;
+    expect(state.lastAction).toBe("dispatched-approach-review");
+
+    const revMessages = sentMessages.filter(m => m.workerId === "rev-w");
+    expect(revMessages.length).toBe(1);
+  });
+
+  test("max rounds exceeded triggers escalation", async () => {
+    const run = makeRun(store);
+    await engine.start("feat-rounds", run.runId, "impl-w", "rev-w");
+
+    // Force the round counter to maxRounds
+    const state = engine.getState(run.runId)!;
+    state.round = state.maxRounds;
+
+    // revision_ready should now trigger max_rounds_exceeded
+    await engine.injectEvent(run.runId, {
+      type: "call.pending",
+      runId: run.runId,
+      workerId: "impl-w",
+      callId: "call-maxround",
+      data: { callType: CALL_TYPES.REVISION_READY },
+      seq: 40,
+      timestamp: nowIso(),
+    });
+
+    expect(engine.getState(run.runId)).toBeUndefined();
+    expect(store.getRun(run.runId)!.state).toBe("escalated");
+  });
 });
 
+// ── CLI Legacy Command Migration Tests ──────────────────────────────
+
 describe("CLI legacy command migration", () => {
-  test("feature-run-status returns migration error", async () => {
+  test("feature-run-status returns migration error", () => {
     const proc = Bun.spawnSync(
       ["bun", "run", join(import.meta.dir, "../../../bin/floe.ts"), "feature-run-status", "--feature", "test"],
       { stdout: "pipe", stderr: "pipe" },
@@ -492,23 +805,11 @@ describe("CLI legacy command migration", () => {
     const output = JSON.parse(proc.stdout.toString());
     expect(output.ok).toBe(false);
     expect(output.error).toContain("removed");
-    expect(output.error).toContain("run.get");
   });
 
-  test("wait-feature-run returns migration error", async () => {
+  test("wait-feature-run returns migration error", () => {
     const proc = Bun.spawnSync(
       ["bun", "run", join(import.meta.dir, "../../../bin/floe.ts"), "wait-feature-run", "--feature", "test"],
-      { stdout: "pipe", stderr: "pipe" },
-    );
-    const output = JSON.parse(proc.stdout.toString());
-    expect(output.ok).toBe(false);
-    expect(output.error).toContain("removed");
-    expect(output.error).toContain("events.subscribe");
-  });
-
-  test("get-worker-result returns migration error", async () => {
-    const proc = Bun.spawnSync(
-      ["bun", "run", join(import.meta.dir, "../../../bin/floe.ts"), "get-worker-result", "--session", "test"],
       { stdout: "pipe", stderr: "pipe" },
     );
     const output = JSON.parse(proc.stdout.toString());

@@ -148,19 +148,37 @@ This applies even when all unit and integration tests pass. Runtime crashes (e.g
 
 ## Resolution Thread
 
-When you reject an approach, the daemon workflow engine enters a **resolution phase**. You and the implementer communicate through a structured resolution thread on the review artefact — not direct messages.
+When you reject an approach or fail a code review, the implementer is auto-resumed with your feedback. You and the implementer coordinate through the daemon's blocking call system.
 
 ### Commands
 - **Add a response:** `bun run .floe/scripts/review.ts add-resolution <rev_id> --from reviewer --kind <kind> '<message>'`
   - Kinds: `objection`, `clarification`, `acceptance`, `counter_proposal`
 - **Read the thread:** `bun run .floe/scripts/review.ts get-resolution <rev_id>`
 
+### Resolving blocking calls
+
+When the implementer signals readiness (via `call-blocking`), the daemon dispatches you with the call ID. You resolve it with your verdict:
+
+- **Approach review** — approve or reject:
+  ```bash
+  bun run .floe/bin/floe.ts call-resolve --call <callId> --response '{"verdict":"approved","continuation":"Approach approved. Proceed."}' --resolved-by reviewer
+  bun run .floe/bin/floe.ts call-resolve --call <callId> --response '{"verdict":"rejected","continuation":"Rejected. See feedback.","rationale":"<reason>"}' --resolved-by reviewer
+  ```
+
+- **Code review** — pass or fail:
+  ```bash
+  bun run .floe/bin/floe.ts call-resolve --call <callId> --response '{"outcome":"pass","continuation":"Review passed. Feature complete."}' --resolved-by reviewer
+  bun run .floe/bin/floe.ts call-resolve --call <callId> --response '{"outcome":"fail","continuation":"Review failed. See findings.","findings":"<details>"}' --resolved-by reviewer
+  ```
+
+Your call ID is provided in the message you receive from the daemon. Resolving auto-resumes the waiting implementer.
+
 ### When to continue vs escalate
 - **Continue** if the implementer's revised approach is getting closer — add an `objection` or `clarification`
-- **Approve** via `approve-approach` when the revised approach meets acceptance criteria
-- **Escalate** (set verdict to `escalated`) when the disagreement is fundamental — e.g. architectural constraints, missing requirements, or scope mismatch that resolution cannot fix
+- **Approve** via `call-resolve` with `verdict: "approved"` when the revised approach meets acceptance criteria
+- **Escalate** via `call-resolve` with `verdict: "rejected"` and record an escalation when the disagreement is fundamental
 
-The thread auto-escalates after 6 entries. You are in an autonomous loop — the daemon workflow engine will deliver your messages.
+The thread auto-escalates after 6 rounds.
 
 ---
 

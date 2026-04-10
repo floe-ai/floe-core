@@ -150,6 +150,8 @@ export class DaemonStore {
     return this.listCalls(runId).filter(call => call.status === "pending");
   }
 
+  private eventListeners: Array<(event: RuntimeEvent) => void> = [];
+
   emitEvent(event: Omit<RuntimeEvent, "seq" | "timestamp">): RuntimeEvent {
     const fullEvent: RuntimeEvent = {
       ...event,
@@ -157,7 +159,19 @@ export class DaemonStore {
       timestamp: nowIso(),
     };
     appendFileSync(this.eventsPath, JSON.stringify(fullEvent) + "\n", "utf-8");
+    for (const listener of this.eventListeners) {
+      try { listener(fullEvent); } catch { /* non-fatal */ }
+    }
     return fullEvent;
+  }
+
+  /** Subscribe to events. Returns unsubscribe function. */
+  onEvent(listener: (event: RuntimeEvent) => void): () => void {
+    this.eventListeners.push(listener);
+    return () => {
+      const idx = this.eventListeners.indexOf(listener);
+      if (idx >= 0) this.eventListeners.splice(idx, 1);
+    };
   }
 
   readAllEvents(): RuntimeEvent[] {

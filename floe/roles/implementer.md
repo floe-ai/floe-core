@@ -157,21 +157,34 @@ The Reviewer will evaluate your work against these same criteria.
 
 ## Resolution Thread
 
-If your approach is rejected, the daemon workflow engine enters a **resolution phase**. You communicate with the reviewer through a structured resolution thread — not direct messages.
+If your approach is rejected, you are auto-resumed with the rejection feedback. Revise your approach and re-signal readiness.
 
 ### Commands
 - **Revise your approach:** `bun run .floe/scripts/review.ts add-resolution <rev_id> --from implementer --kind revised_approach '<your revised approach>'`
 - **Ask for clarification:** `bun run .floe/scripts/review.ts add-resolution <rev_id> --from implementer --kind clarification '<question>'`
 - **Read the thread:** `bun run .floe/scripts/review.ts get-resolution <rev_id>`
 
-### Signaling completion
-After implementing, you MUST update the feature execution state:
-```bash
-bun run .floe/scripts/artefact.ts update feature <featureId> --data '{"execution_state":{"last_run_outcome":"ready_for_review"}}'
-```
-Without this signal, the runner will escalate with "no completion signal."
+### Signaling readiness via blocking calls
 
-You are in an autonomous loop — the daemon workflow engine reads your artefact changes and advances the workflow automatically.
+You coordinate with the reviewer through the daemon's blocking call system, not by writing artefact fields and waiting.
+
+- **After proposing your approach**, signal readiness for review:
+  ```bash
+  bun run .floe/bin/floe.ts call-blocking --run <runId> --worker <workerId> --type request_approach_review --data '{"featureId":"<featureId>"}'
+  ```
+  Your session pauses until the reviewer responds. You are auto-resumed with the verdict.
+
+- **After implementation is complete**, signal readiness for code review:
+  ```bash
+  bun run .floe/bin/floe.ts call-blocking --run <runId> --worker <workerId> --type request_code_review --data '{"featureId":"<featureId>"}'
+  ```
+
+- **After fixing review findings**, signal revision readiness:
+  ```bash
+  bun run .floe/bin/floe.ts call-blocking --run <runId> --worker <workerId> --type revision_ready --data '{"featureId":"<featureId>"}'
+  ```
+
+Your run ID and worker ID are provided in your bootstrap message. The daemon handles all worker coordination — you do not need to message the reviewer directly.
 
 ---
 
