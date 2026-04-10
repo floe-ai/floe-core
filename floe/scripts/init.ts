@@ -23,6 +23,50 @@ const { values } = parseArgs({
 
 const p = paths(values["project-root"] as string | undefined);
 
+// ── Initialise git repository if not already present ─────────────────
+
+const gitDir = join(p.root, ".git");
+let gitInitialised = false;
+if (!existsSync(gitDir)) {
+  const result = Bun.spawnSync(["git", "init"], { cwd: p.root, stdout: "pipe", stderr: "pipe" });
+  if (result.exitCode === 0) {
+    gitInitialised = true;
+  }
+  // Non-fatal: if git is not available, continue without it
+}
+
+// ── Ensure root .gitignore exists ─────────────────────────────────────
+
+const rootGitignore = join(p.root, ".gitignore");
+if (!existsSync(rootGitignore)) {
+  writeFileSync(
+    rootGitignore,
+    [
+      "# Dependencies",
+      "node_modules/",
+      "",
+      "# Build output",
+      "dist/",
+      "dist-electron/",
+      "out/",
+      "build/",
+      "",
+      "# Environment",
+      ".env",
+      ".env.*",
+      "!.env.example",
+      "",
+      "# OS",
+      ".DS_Store",
+      "Thumbs.db",
+      "",
+      "# Floe runtime state (managed separately by .floe/.gitignore)",
+      "",
+    ].join("\n"),
+    "utf-8",
+  );
+}
+
 // ── Scaffold directories ──────────────────────────────────────────────
 
 const dirs = [
@@ -107,6 +151,7 @@ const hasMem = floeMemAvailable();
 
 ok("Framework initialised", {
   project_root: p.root,
+  git_initialised: gitInitialised,
   directories_created: created,
   floe_mem_detected: hasMem,
 });

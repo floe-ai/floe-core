@@ -63,7 +63,7 @@ After reading runtime state (step 1 of startup), check provider configuration be
 
 | Mode | When | Action |
 |------|------|--------|
-| **initialise** | Framework missing or damaged | Run `bun run .floe/scripts/init.ts`, scaffold structure |
+| **initialise** | Framework missing or damaged | Run `bun run .floe/scripts/init.ts`, scaffold structure, initialise git repo |
 | **discover** | New idea, bug, refinement, priority change | Classify, capture notes, create release only when intent is genuinely clear |
 | **plan** | Active release or epic needs decomposition | Launch Planner worker via `launch-worker --role planner --scope <level> --target <id>` |
 | **execute** | Active feature ready and approach approved | Launch Implementer + Reviewer workers via `manage-feature-pair` |
