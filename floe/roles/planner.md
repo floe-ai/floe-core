@@ -25,7 +25,7 @@ When blocked by resolvable ambiguity:
 bun run .floe/bin/floe.ts call-blocking --run <runId> --worker <workerId> --type request_foreman_clarification --data '{"question":"<what you need>"}'
 ```
 
-Your session pauses. You are auto-resumed with the structured answer. Do not assume one exchange ends your participation.
+Your `call-blocking` command blocks until the clarification is resolved. When it returns, `responsePayload` contains the answer — read it from the command output and continue in the same turn. Do not assume one exchange ends your participation.
 
 ---
 

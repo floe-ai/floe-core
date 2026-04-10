@@ -211,8 +211,8 @@ Available commands:
 | `run-get` | Check run state (implementing, awaiting_code_review, completed, escalated) |
 | `events-subscribe` | Stream live events from a run (workflow.progress, call.pending, run.completed) |
 | `events-replay` | Replay past events for a run |
-| `call-blocking` | (Used by workers) Signal a dependency — pauses the worker until resolved |
-| `call-resolve` | (Used by workers/foreman) Resolve a blocking call — auto-resumes waiting worker |
+| `call-blocking` | (Used by workers) Signal a dependency — the command blocks inline until resolved |
+| `call-resolve` | (Used by workers/foreman) Resolve a blocking call — delivers responsePayload to the waiting worker |
 | `call-detect-orphaned` | Scan for timed-out or orphaned blocking calls |
 | `launch-worker` | Start a Planner, Implementer, or Reviewer session (manual use) |
 | `message-worker` | Send ad-hoc instructions to a running worker (not needed during feature execution) |
@@ -238,8 +238,9 @@ Workers are identified by a `sessionId` returned when launched. All session stat
 
 No manual worker messaging is needed during autonomous feature execution.
 The daemon drives alignment → implementation → review via blocking calls.
-Workers signal readiness via call-blocking; reviewers resolve via call-resolve.
-The daemon auto-resumes waiting workers when calls are resolved.
+Workers signal readiness via call-blocking (which blocks inline until resolved); reviewers resolve via call-resolve.
+The worker's call-blocking command returns responsePayload directly — the worker continues in the same turn.
+worker.continue exists as a manual recovery fallback for crash/orphan scenarios, not the normal happy path.
 ```
 
 ## Pre-Code Alignment Protocol

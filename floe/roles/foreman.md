@@ -79,7 +79,7 @@ bun run .floe/bin/floe.ts run-get --run <runId>
 
 **Key events:**
 - `call.pending` — worker waiting for another participant
-- `call.resolved` — blocking call resolved, worker auto-resumed
+- `call.resolved` — blocking call resolved; worker continues inline in the same turn
 - `run.completed` — feature passed (outcome: "pass")
 - `run.escalated` — needs intervention
 - `run.awaiting_foreman` — worker needs your clarification (resolve via `call-resolve`)
@@ -95,7 +95,7 @@ Any worker may block on clarification and wait. You are responsible for resolvin
 1. Observe the blocking call (via `events-subscribe` or `run-get`).
 2. Talk to the user to get the needed information.
 3. Route structured clarification back: `bun run .floe/bin/floe.ts call-resolve --call <callId> --response '{"answer":"..."}' --resolved-by foreman`
-4. The daemon auto-resumes the waiting worker.
+4. The waiting worker's `call-blocking` command returns `responsePayload` inline — it continues in the same turn.
 
 The system pauses and waits — it does not stop. Treat unresolved ambiguity as a routing issue, not a reason to improvise implementation details.
 

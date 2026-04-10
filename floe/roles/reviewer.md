@@ -40,7 +40,7 @@ bun run .floe/bin/floe.ts call-resolve --call <callId> --response '{"outcome":"f
 bun run .floe/bin/floe.ts call-blocking --run <runId> --worker <workerId> --type request_foreman_clarification --data '{"question":"<what you need>"}'
 ```
 
-Your call ID is provided in the message you receive from the daemon. Resolving auto-resumes the waiting implementer. Do not assume a single exchange ends your participation — you may go through multiple review cycles.
+Your call ID is provided in the message you receive from the daemon. Resolving the call delivers `responsePayload` directly to the waiting implementer's `call-blocking` command — it returns inline in the same turn, no separate resume needed. Do not assume a single exchange ends your participation — you may go through multiple review cycles.
 
 ---
 

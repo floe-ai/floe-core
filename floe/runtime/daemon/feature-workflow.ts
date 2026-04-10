@@ -6,14 +6,19 @@
  *
  *   1. Engine bootstraps: sends initial message to implementer
  *   2. Implementer works, then issues call.blocking (request_approach_review)
+ *      call.blocking is a true blocking command — the implementer's subprocess
+ *      long-polls events.subscribe and stays running until call.resolved fires.
  *   3. Engine reacts to call.pending → dispatches reviewer
  *   4. Reviewer evaluates, issues call.resolve with verdict
- *   5. Daemon auto-resumes implementer via workerContinue()
+ *   5. call.resolved event fires; implementer's call.blocking subprocess returns
+ *      responsePayload inline — the implementer reads it and continues in the
+ *      same turn. No separate wake-up or workerContinue is needed.
  *   6. Engine reacts to call.resolved → advances workflow state
  *   7. Repeat for implementation/review phases
  *   8. Terminal states trigger bookkeeping (git commit, feature status, epic cascade)
  *
- * Primary coordination: call.blocking / call.resolve / auto-resume
+ * Primary coordination: call.blocking (inline wait) / call.resolve
+ * worker.continue is a manual/recovery fallback only — not the happy path.
  * Artefact files: durable truth for validation — not the live signalling bus
  */
 
@@ -481,7 +486,7 @@ export class FeatureWorkflowEngine {
         break;
       case CALL_TYPES.FOREMAN_CLARIFICATION:
         state.lastAction = "foreman-responded";
-        state.lastActionResult = "foreman clarification resolved — worker auto-resumed";
+        state.lastActionResult = "foreman clarification resolved — call.blocking returned inline to worker";
         this.emitProgress(state, "foreman_clarification_resolved");
         break;
     }
@@ -496,21 +501,20 @@ export class FeatureWorkflowEngine {
     if (verdict === "approved") {
       state.phase = "implementation";
       state.lastAction = "approach-approved";
-      state.lastActionResult = "approach approved — implementer auto-resumed to implement";
+      state.lastActionResult = "approach approved — call.blocking returned inline, implementer continues in same turn";
       this.transitionRun(state, "implementing");
       this.emitProgress(state, "alignment.approved");
-      // Implementer was auto-resumed by call.resolve with the continuation.
-      // After implementing, implementer should issue call.blocking with
-      // type request_code_review.
+      // Implementer's call.blocking received responsePayload inline.
+      // It reads the verdict and continues — no separate resume needed.
+      // After implementing, implementer issues call.blocking(request_code_review).
     } else if (verdict === "rejected") {
       state.phase = "resolution";
       state.lastAction = "approach-rejected";
-      state.lastActionResult = "approach rejected — implementer auto-resumed with feedback";
+      state.lastActionResult = "approach rejected — call.blocking returned inline with feedback";
       this.transitionRun(state, "plan_revision");
       this.emitProgress(state, "alignment.rejected");
-      // Implementer auto-resumed with rejection feedback.
-      // After revising, implementer should re-issue call.blocking with
-      // type request_approach_review.
+      // Implementer reads rejection via call.blocking responsePayload inline.
+      // After revising, implementer re-issues call.blocking(request_approach_review).
     } else {
       this.escalate(state, "approach_deadlock",
         `unexpected verdict: ${verdict ?? "none"}`);
@@ -533,11 +537,11 @@ export class FeatureWorkflowEngine {
     } else if (outcome === "fail") {
       state.phase = "review"; // stay in review cycle
       state.lastAction = "review-failed";
-      state.lastActionResult = "code review failed — implementer auto-resumed with findings";
+      state.lastActionResult = "code review failed — call.blocking returned inline with findings";
       this.transitionRun(state, "code_revision");
       this.emitProgress(state, "review.failed");
-      // Implementer auto-resumed with failure findings.
-      // After fixing, implementer should issue call.blocking with type revision_ready.
+      // Implementer reads findings via call.blocking responsePayload inline.
+      // After fixing, implementer issues call.blocking(revision_ready).
     } else {
       this.escalate(state, "review_deadlock",
         `unexpected review outcome: ${outcome ?? "none"}`);
