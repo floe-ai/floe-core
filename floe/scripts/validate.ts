@@ -31,11 +31,12 @@ const REQUIRED_CANONICAL_FILES = [
   ".floe/roles/implementer.md",
   ".floe/roles/reviewer.md",
   ".floe/skills/floe-exec/SKILL.md",
+  ".floe/skills/floe-preflight/SKILL.md",
   ".floe/skills/sizing-heuristics/SKILL.md",
   ".floe/schemas/dod.json",
 ] as const;
 
-const REQUIRED_PROVIDER_SKILLS = ["floe-exec", "sizing-heuristics"] as const;
+const REQUIRED_PROVIDER_SKILLS = ["floe-exec", "floe-preflight", "sizing-heuristics"] as const;
 
 interface ProviderLayout {
   name: string;
@@ -110,34 +111,52 @@ function validateFrameworkContract(issues: Issue[]): void {
     if (!providerInstalled) continue;
 
     for (const skill of REQUIRED_PROVIDER_SKILLS) {
-      const pointerPath = join(provider.skillsRoot, skill, "SKILL.md");
-      if (!existsSync(pointerPath)) {
+      const skillPath = join(provider.skillsRoot, skill, "SKILL.md");
+      if (!existsSync(skillPath)) {
         issues.push({
           severity: "error",
           type: "framework",
-          message: `Missing ${provider.name} skill pointer: ${pointerPath.replace(p.root + "/", "")}`,
+          message: `Missing ${provider.name} skill: ${skillPath.replace(p.root + "/", "")}`,
         });
         continue;
       }
 
-      const expectedRef = `.floe/skills/${skill}/SKILL.md`;
       let content = "";
       try {
-        content = readFileSync(pointerPath, "utf-8");
+        content = readFileSync(skillPath, "utf-8");
       } catch {
         issues.push({
           severity: "error",
           type: "framework",
-          message: `Unable to read ${provider.name} skill pointer: ${pointerPath.replace(p.root + "/", "")}`,
+          message: `Unable to read ${provider.name} skill: ${skillPath.replace(p.root + "/", "")}`,
         });
         continue;
       }
-      if (!content.includes(expectedRef)) {
+
+      // Skill must contain real content — not a thin pointer stub
+      if (content.trim().length < 100) {
         issues.push({
           severity: "error",
           type: "framework",
-          message: `${provider.name} skill pointer does not reference canonical file: ${pointerPath.replace(p.root + "/", "")} -> ${expectedRef}`,
+          message: `${provider.name} skill appears empty or is a stub: ${skillPath.replace(p.root + "/", "")}`,
         });
+        continue;
+      }
+
+      // Skill content must match the canonical source
+      const canonicalPath = join(p.root, ".floe", "skills", skill, "SKILL.md");
+      if (existsSync(canonicalPath)) {
+        let canonical = "";
+        try {
+          canonical = readFileSync(canonicalPath, "utf-8");
+        } catch { /* ignore — canonical read failure is caught in REQUIRED_CANONICAL_FILES check */ }
+        if (canonical && content !== canonical) {
+          issues.push({
+            severity: "warning",
+            type: "framework",
+            message: `${provider.name} skill out of sync with canonical: ${skillPath.replace(p.root + "/", "")} (re-run installer to update)`,
+          });
+        }
       }
     }
   }
