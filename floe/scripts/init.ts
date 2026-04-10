@@ -151,11 +151,57 @@ if (!existsSync(stateFile)) {
 
 const hasMem = floeMemAvailable();
 
+// ── Credential helper detection ───────────────────────────────────────
+
+/**
+ * Probe for the best available git credential helper in priority order:
+ *   1. Git Credential Manager (cross-platform, most secure)
+ *   2. Platform keychain (osxkeychain / wincred / gnome-libsecret)
+ *   3. cache  — in-memory, survives a session (unavailable on Windows)
+ *   4. store  — plaintext fallback, always present
+ */
+function detectCredentialHelper(): string {
+  function binaryExists(name: string): boolean {
+    const probe = Bun.spawnSync(
+      process.platform === "win32" ? ["where", name] : ["which", name],
+      { stdout: "ignore", stderr: "ignore" },
+    );
+    return probe.exitCode === 0;
+  }
+
+  // Priority list: tuples of [git-config-value, binary-to-probe | null]
+  // null means always-available (no binary check needed).
+  const candidates: Array<[string, string | null]> = [
+    ["manager",             "git-credential-manager"],
+    ["manager-core",        "git-credential-manager-core"],
+    ...(process.platform === "darwin"
+      ? [["osxkeychain",    "git-credential-osxkeychain"] as [string, string]]
+      : []),
+    ...(process.platform === "win32"
+      ? [["wincred",        "git-credential-wincred"] as [string, string]]
+      : []),
+    ...(process.platform === "linux"
+      ? [
+          ["gnome-libsecret", "git-credential-gnome-libsecret"] as [string, string],
+          ["secretservice",   "git-credential-secretservice"] as [string, string],
+        ]
+      : []),
+    // cache: in-memory, not available on Windows
+    ...(process.platform !== "win32" ? [["cache", null] as [string, null]] : []),
+    ["store", null],  // plaintext fallback — always available
+  ];
+
+  for (const [helper, binary] of candidates) {
+    if (binary === null || binaryExists(binary)) return helper;
+  }
+  return "store";
+}
+
 // ── Set up remote, credential helper, initial commit + push ──────────
 
 const remoteUrl = values["remote"] as string | undefined;
 const branchName = (values["branch"] as string | undefined) || "main";
-let remoteSetup: { ok: boolean; remote?: string; branch?: string; pushed?: boolean; error?: string } | null = null;
+let remoteSetup: { ok: boolean; remote?: string; branch?: string; pushed?: boolean; credentialHelper?: string; error?: string } | null = null;
 
 if (remoteUrl) {
   try {
@@ -166,8 +212,6 @@ if (remoteUrl) {
     const currentBranchName = currentBranch.stdout.toString().trim();
     if (currentBranchName !== branchName && currentBranchName !== "HEAD") {
       Bun.spawnSync(["git", "branch", "-M", branchName], { cwd: p.root, stdout: "ignore", stderr: "ignore" });
-    } else if (currentBranchName === "HEAD") {
-      // No commits yet — we need at least one commit before renaming
     }
 
     // Add or update origin remote
@@ -179,12 +223,11 @@ if (remoteUrl) {
       Bun.spawnSync(["git", "remote", "add", "origin", remoteUrl], { cwd: p.root, stdout: "ignore", stderr: "ignore" });
     }
 
-    // Configure credential helper for HTTPS remotes so subsequent pushes are not prompted
+    // Detect and configure credential helper for HTTPS remotes
+    let credentialHelper: string | undefined;
     if (remoteUrl.startsWith("https://")) {
-      const helper = process.platform === "darwin" ? "osxkeychain"
-        : process.platform === "win32" ? "wincred"
-        : "store";
-      Bun.spawnSync(["git", "config", "credential.helper", helper], { cwd: p.root, stdout: "ignore", stderr: "ignore" });
+      credentialHelper = detectCredentialHelper();
+      Bun.spawnSync(["git", "config", "credential.helper", credentialHelper], { cwd: p.root, stdout: "ignore", stderr: "ignore" });
     }
 
     // Stage everything and make the initial commit (if working tree is dirty)
@@ -204,9 +247,9 @@ if (remoteUrl) {
       env: { ...process.env },
     });
     if (pushResult.exitCode === 0) {
-      remoteSetup = { ok: true, remote: remoteUrl, branch: branchName, pushed: true };
+      remoteSetup = { ok: true, remote: remoteUrl, branch: branchName, pushed: true, credentialHelper };
     } else {
-      remoteSetup = { ok: false, remote: remoteUrl, error: pushResult.stderr.toString().trim() || "push failed" };
+      remoteSetup = { ok: false, remote: remoteUrl, credentialHelper, error: pushResult.stderr.toString().trim() || "push failed" };
     }
   } catch (e: any) {
     remoteSetup = { ok: false, remote: remoteUrl, error: e?.message ?? "unknown error" };
