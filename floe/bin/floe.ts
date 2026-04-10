@@ -1144,6 +1144,77 @@ function daemonCommand(action: string) {
   return async (args: Record<string, any>) => callDaemonAction(action, args);
 }
 
+/**
+ * True-blocking call-blocking implementation.
+ *
+ * Registers the blocking call with the daemon, then long-polls events.subscribe
+ * until the matching call.resolved event arrives. The worker's tool-call subprocess
+ * stays running the entire time — the worker never "ends its turn" and never needs
+ * to be woken up afterwards. The resolution responsePayload is returned inline.
+ */
+async function callBlockingAndWait(args: Record<string, any>): Promise<Record<string, unknown>> {
+  const endpoint = await ensureDaemonRunning(args);
+  const payload = buildDaemonPayload("call.blocking", args);
+
+  // Step 1: register the blocking call.
+  const registerResp = await sendDaemonRequest(endpoint, "call.blocking", payload);
+  if (!registerResp.ok) {
+    return { ok: false, action: "call.blocking", endpoint, error: registerResp.error ?? "call.blocking registration failed" };
+  }
+
+  const callId = (registerResp.result as Record<string, any>)?.call?.callId as string | undefined;
+  const runId = payload.runId as string | undefined;
+  if (!callId || !runId) {
+    return { ok: false, error: "call.blocking did not return callId or runId — cannot wait for resolution" };
+  }
+
+  // Step 2: long-poll until call.resolved fires for this callId.
+  // Default wait: 30 minutes (matching the session --wait-ms convention).
+  const waitMs = parsePositiveMs(args["wait-ms"]) ?? 1_800_000;
+  const pollChunkMs = 30_000; // each events.subscribe request waits up to 30 s
+  const start = Date.now();
+  let cursor = 0;
+
+  while (Date.now() - start < waitMs) {
+    const remaining = waitMs - (Date.now() - start);
+    const chunkWait = Math.min(pollChunkMs, remaining);
+
+    const evtResp = await sendDaemonRequest(endpoint, "events.subscribe", {
+      runId,
+      callId,
+      cursor,
+      waitMs: chunkWait,
+      limit: 50,
+    });
+
+    if (!evtResp.ok) {
+      return { ok: false, error: evtResp.error ?? "events.subscribe failed while waiting for call resolution" };
+    }
+
+    const result = evtResp.result as Record<string, any>;
+    const events: Array<Record<string, any>> = result?.events ?? [];
+
+    for (const event of events) {
+      if (event.type === "call.resolved" && event.callId === callId) {
+        return {
+          ok: true,
+          callId,
+          responsePayload: event.data?.responsePayload ?? null,
+          resolvedBy: event.data?.resolvedBy ?? null,
+        };
+      }
+    }
+
+    cursor = (result?.nextCursor as number | undefined) ?? cursor;
+  }
+
+  return {
+    ok: false,
+    error: `Timed out after ${waitMs}ms waiting for call ${callId} to be resolved`,
+    callId,
+  };
+}
+
 // ─── CLI dispatch ────────────────────────────────────────────────────
 
 const [command, ...rest] = Bun.argv.slice(2);
@@ -1259,10 +1330,12 @@ async function main() {
     "worker-get": daemonCommand("worker.get"),
 
     // Continuation call lifecycle
-    "call.blocking": daemonCommand("call.blocking"),
+    // call-blocking truly blocks: registers the call then long-polls until resolved,
+    // returning the responsePayload inline to the worker in the same turn.
+    "call.blocking": callBlockingAndWait,
     "call.resolve": daemonCommand("call.resolve"),
     "call.detectOrphaned": daemonCommand("call.detectOrphaned"),
-    "call-blocking": daemonCommand("call.blocking"),
+    "call-blocking": callBlockingAndWait,
     "call-resolve": daemonCommand("call.resolve"),
     "call-detect-orphaned": daemonCommand("call.detectOrphaned"),
 

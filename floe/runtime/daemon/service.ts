@@ -994,58 +994,17 @@ export class DaemonService {
       runId: resolved.runId,
       workerId: resolved.workerId,
       callId: resolved.callId,
-      data: { resolvedBy: payload.resolvedBy ?? null },
+      // Include responsePayload in the event so call-blocking CLI can read the
+      // resolution inline (true-blocking model) without needing a separate wake-up.
+      data: { resolvedBy: payload.resolvedBy ?? null, responsePayload: payload.responsePayload ?? null },
     });
 
-    // Happy-path behavior: resolving a blocking call auto-resumes the waiting worker.
-    const worker = this.store.getWorker(resolved.workerId);
-    const workerCanResume = worker && (worker.state === "waiting" || worker.state === "resolved");
-
-    if (!workerCanResume) {
-      return { call: resolved, autoResumed: false, reason: "worker-not-waiting" };
-    }
-
-    const messageFromPayload =
-      (payload.responsePayload?.continuation as string | undefined)
-      ?? (payload.responsePayload?.message as string | undefined)
-      ?? (payload.responsePayload ? JSON.stringify(payload.responsePayload, null, 2) : undefined);
-
-    if (!messageFromPayload) {
-      return { call: resolved, autoResumed: false, reason: "missing-continuation-message" };
-    }
-
-    try {
-      const continueResult = await this.workerContinue({
-        workerId: resolved.workerId,
-        callId: resolved.callId,
-        continuation: messageFromPayload,
-        runId: resolved.runId,
-      });
-      return { call: resolved, autoResumed: true, continueResult };
-    } catch (error: any) {
-      const stalledWorker = this.store.getWorker(resolved.workerId);
-      if (stalledWorker) {
-        this.store.upsertWorker({
-          ...stalledWorker,
-          state: "stalled",
-          updatedAt: nowIso(),
-          lastError: error?.message ?? String(error),
-        });
-      }
-      this.store.emitEvent({
-        type: "worker.stalled",
-        runId: resolved.runId,
-        workerId: resolved.workerId,
-        callId: resolved.callId,
-        data: { reason: error?.message ?? String(error) },
-      });
-      return {
-        call: resolved,
-        autoResumed: false,
-        reason: "auto-resume-failed",
-        autoResumeError: error?.message ?? String(error),
-      };
-    }
+    // The call-blocking CLI long-polls for call.resolved and returns the responsePayload
+    // inline to the worker. The worker reads the resolution in the same turn — no
+    // wake-up message needed. Auto-resume has been removed to avoid sending a concurrent
+    // message into an active session (the worker's turn is still in progress while
+    // call-blocking is blocked). Orphan/crash recovery is handled by call.detect-orphaned.
+    return { call: resolved, autoResumed: false, reason: "inline-resolution" };
   }
 
   private async callDetectOrphaned(payload: CallDetectOrphanedPayload): Promise<Record<string, unknown>> {
@@ -1162,22 +1121,26 @@ export class DaemonService {
   private async eventsSubscribe(payload: EventsSubscribePayload): Promise<Record<string, unknown>> {
     const waitMs = Math.max(0, Number(payload.waitMs ?? 0) || 0);
     const limit = payload.limit ?? 100;
-    const cursor = payload.cursor ?? 0;
+    let cursor = payload.cursor ?? 0;
 
     const start = Date.now();
     while (true) {
-      const events = this.store.listEvents({ runId: payload.runId, cursor, limit });
-      if (events.length > 0 || waitMs === 0) {
+      const raw = this.store.listEvents({ runId: payload.runId, cursor, limit });
+      // Filter by callId if provided so callers can efficiently wait for a specific call.
+      const filtered = payload.callId ? raw.filter((e) => e.callId === payload.callId) : raw;
+      if (filtered.length > 0 || waitMs === 0) {
         return {
-          events,
+          events: filtered,
           cursor,
-          nextCursor: events.length > 0 ? events[events.length - 1]!.seq : cursor,
+          nextCursor: raw.length > 0 ? raw[raw.length - 1]!.seq : cursor,
           waitedMs: Date.now() - start,
         };
       }
       if (Date.now() - start >= waitMs) {
         return { events: [], cursor, nextCursor: cursor, waitedMs: Date.now() - start };
       }
+      // Advance cursor even when no filtered events so we don't re-scan old unrelated events.
+      if (raw.length > 0) cursor = raw[raw.length - 1]!.seq;
       await Bun.sleep(250);
     }
   }

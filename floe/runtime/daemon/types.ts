@@ -213,6 +213,8 @@ export interface WorkerGetPayload {
 
 export interface EventsSubscribePayload {
   runId?: string;
+  /** If provided, only return events whose callId matches this value. */
+  callId?: string;
   cursor?: number;
   limit?: number;
   waitMs?: number;

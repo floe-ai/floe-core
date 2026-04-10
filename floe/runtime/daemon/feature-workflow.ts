@@ -364,7 +364,7 @@ export class FeatureWorkflowEngine {
       `  Approve: bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '${approvedResponse}' --resolved-by reviewer`,
       `  Reject:  bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '${rejectedResponse}' --resolved-by reviewer`,
       "",
-      "This will automatically resume the implementer with your verdict and next-step instructions.",
+      "The implementer's call-blocking command is waiting for this resolution and will receive your verdict inline.",
     ].join("\n");
 
     const result = await this.sendMessage(state.revWorkerId, msg);
@@ -403,7 +403,7 @@ export class FeatureWorkflowEngine {
       `  Pass: bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '${passResponse}' --resolved-by reviewer`,
       `  Fail: bun run .floe/bin/floe.ts call-resolve --call ${callId ?? "<call_id>"} --response '${failResponse}' --resolved-by reviewer`,
       "",
-      "This will automatically resume the implementer with next-step instructions.",
+      "The implementer's call-blocking command is waiting for this resolution and will receive your verdict inline.",
     ].join("\n");
 
     const result = await this.sendMessage(state.revWorkerId, msg);
