@@ -266,7 +266,7 @@ switch (cmd) {
         cmd: [
           "bun", "run", escScript,
           "create",
-          "--from", "feature-runner",
+          "--from", "daemon",
           "--feature", featureId,
           "--reason", "approach_deadlock",
           "--review", review.id,

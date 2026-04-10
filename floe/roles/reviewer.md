@@ -148,7 +148,7 @@ This applies even when all unit and integration tests pass. Runtime crashes (e.g
 
 ## Resolution Thread
 
-When you reject an approach, the feature runner enters a **resolution phase**. You and the implementer communicate through a structured resolution thread on the review artefact — not direct messages.
+When you reject an approach, the daemon workflow engine enters a **resolution phase**. You and the implementer communicate through a structured resolution thread on the review artefact — not direct messages.
 
 ### Commands
 - **Add a response:** `bun run .floe/scripts/review.ts add-resolution <rev_id> --from reviewer --kind <kind> '<message>'`
@@ -160,7 +160,7 @@ When you reject an approach, the feature runner enters a **resolution phase**. Y
 - **Approve** via `approve-approach` when the revised approach meets acceptance criteria
 - **Escalate** (set verdict to `escalated`) when the disagreement is fundamental — e.g. architectural constraints, missing requirements, or scope mismatch that resolution cannot fix
 
-The thread auto-escalates after 6 entries. You are in an autonomous loop — the feature runner will deliver your messages.
+The thread auto-escalates after 6 entries. You are in an autonomous loop — the daemon workflow engine will deliver your messages.
 
 ---
 

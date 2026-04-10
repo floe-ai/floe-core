@@ -9,14 +9,15 @@
  *   resume-worker        Resume an existing session
  *   message-worker       Send a message to an active worker (daemon-managed)
  *   get-worker-status    Get session status
- *   get-worker-result    Deprecated (legacy async polling removed)
- *   wait-worker          Deprecated (legacy async polling removed)
+ *   get-worker-result    Removed (migration: use events.subscribe)
+ *   wait-worker          Removed (migration: use events.subscribe)
  *   replace-worker       Stop and re-launch a worker
  *   stop-worker          Stop a worker session
  *   list-active-workers  List all active sessions
- *   manage-feature-pair  Launch implementer + reviewer pair in daemon runtime
+ *   manage-feature-pair  Launch implementer + reviewer pair (daemon-native workflow)
  *   check-alignment      Check approach alignment status for a feature
- *   feature-run-status   Get status of an autonomous feature run
+ *   feature-run-status   Removed (migration: use run.get)
+ *   wait-feature-run     Removed (migration: use events.subscribe)
  *   show-dod             Show the project Definition of Done
  *   edit-dod             Open the DoD file in $EDITOR
  *   list-escalations     List escalation records (optional --status)
@@ -697,79 +698,6 @@ async function manageFeaturePair(args: Record<string, any>) {
   if (implResolved.error) return { ok: false, error: implResolved.error };
   if (revResolved.error) return { ok: false, error: revResolved.error };
 
-  const runStart = await callDaemonAction("run.start", {
-    ...args,
-    type: "feature_execution",
-    objective: `Execute feature ${args.feature}`,
-    data: JSON.stringify({
-      participants: [],
-      metadata: {
-        featureId: args.feature,
-        epicId: args.epic ?? null,
-        releaseId: args.release ?? null,
-      },
-    }),
-  });
-  if (!runStart.ok) return runStart;
-  const runId = (runStart as any).run?.runId as string | undefined;
-  if (!runId) return { ok: false, error: "Daemon did not return runId from run.start" };
-
-  // Build implementer context: inject srcRoot if configured
-  const implAddendum = config?.srcRoot ? srcRootContextAddendum(config.srcRoot) : undefined;
-
-  const implementer = await callDaemonAction("worker.start", {
-    ...args,
-    run: runId,
-    role: "implementer",
-    provider: implResolved.provider,
-    feature: args.feature,
-    epic: args.epic,
-    release: args.release,
-    ...(implAddendum ? { contextAddendum: implAddendum } : {}),
-  });
-  if (!implementer.ok) {
-    await callDaemonAction("run.escalate", { ...args, run: runId, reason: `Implementer launch failed: ${(implementer as any).error ?? "unknown error"}` });
-    return { ok: false, error: `Implementer launch failed: ${(implementer as any).error ?? "unknown error"}`, runId };
-  }
-
-  const reviewer = await callDaemonAction("worker.start", {
-    ...args,
-    run: runId,
-    role: "reviewer",
-    provider: revResolved.provider,
-    feature: args.feature,
-    epic: args.epic,
-    release: args.release,
-  });
-  if (!reviewer.ok) {
-    await callDaemonAction("run.escalate", { ...args, run: runId, reason: `Reviewer launch failed: ${(reviewer as any).error ?? "unknown error"}` });
-    return { ok: false, error: `Reviewer launch failed: ${(reviewer as any).error ?? "unknown error"}`, runId };
-  }
-
-  const implWorkerId = (implementer as any).workerId as string;
-  const revWorkerId = (reviewer as any).workerId as string;
-
-  // Write initial feature-run state synchronously so feature-run-status works immediately
-  const stateDir = join(projectRoot, ".floe", "state", "feature-runs");
-  const stateFile = join(stateDir, `${args.feature}.json`);
-  if (!existsSync(stateFile)) {
-    mkdirSync(stateDir, { recursive: true });
-    const now = new Date().toISOString();
-    const initState = {
-      featureId: args.feature,
-      implSessionId: implWorkerId,
-      revSessionId: revWorkerId,
-      phase: "alignment",
-      round: 0,
-      maxRounds: 3,
-      lastAction: "",
-      startedAt: now,
-      updatedAt: now,
-      outcome: null,
-    };
-    writeFileSync(stateFile, JSON.stringify(initState, null, 2) + "\n", "utf-8");
-  }
-
   // Derive and set active release/epic/feature context from the feature artefact chain
   try {
     const featureFile = join(projectRoot, "delivery", "features", `${args.feature}.json`);
@@ -795,26 +723,28 @@ async function manageFeaturePair(args: Record<string, any>) {
     }
   } catch { /* non-fatal — don't block launch if state derivation fails */ }
 
-  // Spawn feature runner in background to drive the alignment → implementation → review loop
-  const runnerScript = join(dirname(import.meta.dir), "scripts", "feature-runner.ts");
-  const runnerProc = Bun.spawn(
-    ["bun", "run", runnerScript, "run",
-      "--feature", args.feature,
-      "--impl-session", implWorkerId,
-      "--rev-session", revWorkerId,
-    ],
-    { cwd: projectRoot, stdio: ["ignore", "ignore", "ignore"] },
-  );
-  runnerProc.unref();
+  // Call the daemon's run.feature action — all orchestration happens in-process
+  const result = await callDaemonAction("run.feature", {
+    ...args,
+    data: JSON.stringify({
+      featureId: args.feature,
+      implProvider: implResolved.provider,
+      revProvider: revResolved.provider,
+      epicId: args.epic ?? null,
+      releaseId: args.release ?? null,
+      srcRoot: config?.srcRoot ?? null,
+    }),
+  });
+
+  if (!result.ok) return result;
 
   return {
     ok: true,
     featureId: args.feature,
-    runId,
+    runId: (result as any).runId,
     runtimeManaged: true,
-    runnerStarted: true,
-    implementer: { sessionId: implWorkerId, provider: implResolved.provider },
-    reviewer: { sessionId: revWorkerId, provider: revResolved.provider },
+    implementer: (result as any).implementer,
+    reviewer: (result as any).reviewer,
   };
 }
 
@@ -853,57 +783,19 @@ async function editDod(_args: Record<string, any>) {
   return { ok: true, message: `DoD updated (${dod.criteria.length} criteria)` };
 }
 
-// ─── Feature runner status ───────────────────────────────────────────
+// ─── Legacy feature-runner commands (removed — daemon-native) ────────
 
-async function featureRunStatus(args: Record<string, any>) {
-  if (!args.feature) return { ok: false, error: "feature-run-status requires --feature <id>" };
-  const statePath = join(projectRoot, ".floe", "state", "feature-runs", `${args.feature}.json`);
-  if (!existsSync(statePath)) return { ok: false, error: `No feature run found for: ${args.feature}` };
-  try {
-    return { ok: true, ...JSON.parse(readFileSync(statePath, "utf-8")) };
-  } catch (e: any) {
-    return { ok: false, error: `Failed to read feature run state: ${e.message}` };
-  }
-}
-
-/**
- * Block until the feature runner reaches a terminal state (complete or escalated),
- * then return the final state. Equivalent to awaiting a promise — the Foreman
- * can call manage-feature-pair followed immediately by wait-feature-run and treat
- * the whole thing as a single synchronous tool call.
- *
- * --timeout <ms>   Maximum wait time. Default: 3 600 000 ms (1 hour).
- * --poll-ms <ms>   State-file poll interval. Default: 10 000 ms (10 s).
- */
-async function waitFeatureRun(args: Record<string, any>) {
-  if (!args.feature) return { ok: false, error: "wait-feature-run requires --feature <id>" };
-
-  const timeoutMs = parseInt(args.timeout ?? "3600000", 10);
-  const pollMs    = parseInt(args["poll-ms"] ?? "10000", 10);
-  const statePath = join(projectRoot, ".floe", "state", "feature-runs", `${args.feature}.json`);
-  const TERMINAL  = ["complete", "escalated"];
-  const deadline  = Date.now() + timeoutMs;
-
-  while (Date.now() < deadline) {
-    if (existsSync(statePath)) {
-      try {
-        const state = JSON.parse(readFileSync(statePath, "utf-8"));
-        if (TERMINAL.includes(state.phase)) {
-          return { ok: true, ...state };
-        }
-      } catch { /* state file mid-write — retry */ }
-    }
-    await new Promise((r) => setTimeout(r, pollMs));
-  }
-
-  // Timed out — return last known state if available
-  let lastState: any = null;
-  try { if (existsSync(statePath)) lastState = JSON.parse(readFileSync(statePath, "utf-8")); } catch {}
+async function featureRunStatus(_args: Record<string, any>) {
   return {
     ok: false,
-    error: `Timed out after ${timeoutMs}ms waiting for feature run`,
-    feature: args.feature,
-    lastKnownState: lastState,
+    error: "feature-run-status is removed. Feature runs are now daemon-managed. Use: run.get --run <runId> or events.subscribe --run <runId>",
+  };
+}
+
+async function waitFeatureRun(_args: Record<string, any>) {
+  return {
+    ok: false,
+    error: "wait-feature-run is removed. Feature runs are now daemon-managed. Use: events.subscribe --run <runId> --wait-ms <ms>",
   };
 }
 
@@ -1322,10 +1214,12 @@ async function main() {
     "run.complete": daemonCommand("run.complete"),
     "run.escalate": daemonCommand("run.escalate"),
     "run.get": daemonCommand("run.get"),
+    "run.feature": daemonCommand("run.feature"),
     "run-start": daemonCommand("run.start"),
     "run-complete": daemonCommand("run.complete"),
     "run-escalate": daemonCommand("run.escalate"),
     "run-get": daemonCommand("run.get"),
+    "run-feature": daemonCommand("run.feature"),
 
     // Worker lifecycle
     "worker.start": daemonCommand("worker.start"),

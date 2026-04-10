@@ -93,7 +93,7 @@ Check `remote_setup.ok` in the response. If `ok: false`, surface the error to th
 
 **If the user skips the remote:** proceed normally. They can add a remote at any time by re-running `bun run .floe/scripts/init.ts --remote <url>`.
 
-**Auto-commit and push during execution:** Once a remote is configured, the feature runner automatically commits and pushes after each feature completes. No manual git management is needed.
+**Auto-commit and push during execution:** Once a remote is configured, the daemon automatically commits and pushes after each feature completes. No manual git management is needed.
 
 ### Discover mode scope
 
@@ -239,20 +239,13 @@ bun run .floe/bin/floe.ts launch-worker --role planner --scope intake --target <
 bun run .floe/bin/floe.ts launch-worker --role planner --scope <release|epic> --target <id> --message "<task>"
 bun run .floe/bin/floe.ts manage-feature-pair --feature <id>
 
-# Feature run — await pattern (preferred)
-bun run .floe/bin/floe.ts wait-feature-run --feature <id>                  # block until complete/escalated (default 1h timeout)
-bun run .floe/bin/floe.ts wait-feature-run --feature <id> --timeout 7200000 # custom timeout (ms)
+# Feature run observation (daemon-native)
+bun run .floe/bin/floe.ts run-get --run <runId>                            # full run state + workers + calls
+bun run .floe/bin/floe.ts events-subscribe --run <runId> --wait-ms 60000   # block until new events arrive
+bun run .floe/bin/floe.ts events-replay --run <runId>                      # replay all events for a run
 
-# Feature run — polling pattern (for very long runs or progress reporting)
-bun run .floe/bin/floe.ts feature-run-status --feature <id>                # snapshot of current state
-
-# Send messages to workers
+# Send messages to workers (ad-hoc only — not needed during feature execution)
 bun run .floe/bin/floe.ts message-worker --session <id> --message "<msg>"
-bun run .floe/bin/floe.ts message-worker --session <id> --message "<msg>" --async
-
-# Async result polling
-bun run .floe/bin/floe.ts get-worker-result --session <id>
-bun run .floe/bin/floe.ts wait-worker --session <id> [--timeout <ms>]
 
 # Worker lifecycle
 bun run .floe/bin/floe.ts resume-worker --session <id>
@@ -260,6 +253,10 @@ bun run .floe/bin/floe.ts get-worker-status --session <id>
 bun run .floe/bin/floe.ts replace-worker --session <id>
 bun run .floe/bin/floe.ts stop-worker --session <id>
 bun run .floe/bin/floe.ts list-active-workers
+
+# Daemon runtime
+bun run .floe/bin/floe.ts runtime-status                                   # check daemon health
+bun run .floe/bin/floe.ts call-detect-orphaned --run <runId>               # find orphaned blocking calls
 
 # Alignment
 bun run .floe/bin/floe.ts check-alignment --feature <id>
@@ -282,10 +279,12 @@ When launching execution, use `manage-feature-pair` which validates that the fea
 
 ## Worker Session Lifecycle (critical — read this)
 
-Each CLI invocation is a **separate process**. Sessions survive across invocations because:
+All worker sessions are managed by the **daemon runtime**. The daemon owns session creation, message routing, state tracking, and event emission. You interact with it through CLI commands that dispatch to daemon actions.
+
+Sessions survive across CLI invocations because:
 1. Session metadata is persisted to `.floe/state/sessions.json`
-2. Provider SDKs store conversation state on disk (thread files, infinite sessions, JSONL)
-3. The CLI automatically resumes sessions when needed (transparent to you)
+2. Provider SDKs store conversation state on disk
+3. The daemon automatically resumes sessions when needed
 
 ### Launch + Task Pattern
 
@@ -302,124 +301,61 @@ bun run .floe/bin/floe.ts launch-worker --role planner --scope release --target 
 bun run .floe/bin/floe.ts message-worker --session <returned-id> --message "<task>"
 ```
 
-### Async Workers (for long-running tasks)
-
-Worker responses (planning, implementing, reviewing) **take minutes, not seconds**. For long-running tasks, use `--async` to avoid blocking:
-
-```bash
-# Send task asynchronously — returns immediately
-bun run .floe/bin/floe.ts launch-worker --role planner --scope release --target rel-001 \
-  --message "<task>" --async
-# Returns: { ok: true, dispatched: true, resultPath: "..." }
-
-# Poll for result
-bun run .floe/bin/floe.ts get-worker-result --session <id>
-# Returns: { status: "pending" | "complete" | "error", content: "..." }
-
-# Or block until complete (with timeout)
-bun run .floe/bin/floe.ts wait-worker --session <id> --timeout 600000
-```
-
-**When to use `--async`:**
-- Planner decomposition (may take 2-10 minutes)
-- Implementer coding tasks (may take 5-30 minutes)
-- Reviewer evaluation (may take 2-10 minutes)
-
-**When to use synchronous (no `--async`):**
-- Short queries ("what is the status of X?")
-- Acknowledgements
-- Context probes
-
 ### Expected Flow: Plan Mode
 
 ```bash
-# 1. Launch planner with task (async for long decomposition)
+# 1. Launch planner with task
 bun run .floe/bin/floe.ts launch-worker --role planner --scope release --target rel-001 \
-  --message "Decompose this release into epics..." --async
+  --message "Decompose this release into epics..."
 
-# 2. Poll or wait for completion
-bun run .floe/bin/floe.ts get-worker-result --session <planner-id>
-
-# 3. Once complete, inspect the created artefacts
+# 2. Once complete, inspect the created artefacts
 bun run .floe/scripts/artefact.ts list epic
 ```
 
 ### Expected Flow: Execute Mode
 
-The feature runner is a background process. Use `wait-feature-run` to block until it finishes — this is the preferred, await-like pattern:
+Feature execution is **daemon-native**. `manage-feature-pair` tells the daemon to create a run, start both workers, and drive the full alignment → implementation → review loop internally. No background subprocess is involved — the daemon owns the entire workflow.
 
 ```bash
-# 1. Launch implementer + reviewer pair — autonomous runner starts in background
+# 1. Launch feature execution — daemon handles everything
 bun run .floe/bin/floe.ts manage-feature-pair --feature feat-001
-# Returns immediately: { ok: true, runId, runnerStarted: true, implementer: {...}, reviewer: {...} }
+# Returns: { ok: true, runId: "run-xxx", implementer: {...}, reviewer: {...} }
 
-# 2. Await completion (blocks until phase is "complete" or "escalated")
-bun run .floe/bin/floe.ts wait-feature-run --feature feat-001
-# Returns final state: { phase, outcome, round, ... }
+# 2. Observe progress via daemon events (blocks until new events arrive)
+bun run .floe/bin/floe.ts events-subscribe --run <runId> --wait-ms 60000
+# Returns: { events: [...], nextCursor: N }
 
-# 3. React to the terminal state
-# phase: "complete"   → proceed to next feature
-# phase: "escalated"  → read escalationReason, surface to user, resolve before continuing
+# 3. Or check run state at any time
+bun run .floe/bin/floe.ts run-get --run <runId>
+# Returns: { run: { state: "implementing"|"completed"|"escalated", ... }, workers: [...], calls: [...] }
 ```
 
-`wait-feature-run` accepts `--timeout <ms>` (default 3 600 000 ms = 1 hour). For features you expect to take longer, pass a higher timeout. If it times out, `lastKnownState` in the response shows where the runner was — you can then poll with `feature-run-status` to continue monitoring.
+**Key events to watch for:**
+- `workflow.started` — engine kicked off
+- `workflow.progress` — phase transition or action taken
+- `run.completed` — feature passed review (outcome: "pass")
+- `run.escalated` — feature needs intervention (read escalationReason)
 
-**Use `feature-run-status` (polling) only when:**
-- You need incremental progress updates to surface to the user mid-run
-- The feature is expected to run for several hours and you want to checkpoint between turns
-- You are resuming an already-running feature from a fresh conversation
+**You do NOT need to:**
+- Message workers during the autonomous loop
+- Poll for status files
+- Run any background process
 
-The feature runner drives the full alignment → implementation → review loop automatically. You do NOT need to message workers manually. Only intervene after escalation.
-
----
-
-## Autonomous Feature Runner
-
-When you launch a feature pair via `manage-feature-pair`, the **feature runner** starts automatically in the background. It drives the full alignment → resolution → implementation → review loop without your intervention.
-
-## Autonomous Feature Runner
-
-When you launch a feature pair via `manage-feature-pair`, the **feature runner** starts automatically in the background. It drives the full alignment → resolution → implementation → review loop without your intervention.
-
-### Preferred pattern: await
-
-```bash
-# 1. Launch workers + runner
-bun run .floe/bin/floe.ts manage-feature-pair --feature <id>
-
-# 2. Await — blocks until the runner reaches a terminal state
-bun run .floe/bin/floe.ts wait-feature-run --feature <id> [--timeout <ms>]
-# Returns: { ok: true, phase: "complete"|"escalated", outcome, ... }
-```
-
-This is the simplest flow. Treat the two commands together as a single async tool call.
-
-### Fallback: polling (use when await might time out)
-
-```bash
-# Check current progress without blocking
-bun run .floe/bin/floe.ts feature-run-status --feature <id>
-```
-
-Use polling when:
-- The feature is expected to run for several hours (beyond your provider's turn timeout)
-- You want to report progress to the user mid-run
-- You are resuming monitoring from a fresh conversation
+The daemon drives the full loop. Only intervene after escalation.
 
 ### Handling escalation returns
-When `phase: "escalated"`, read `escalationReason`:
+
+When run state is `"escalated"`, check the escalation reason:
 - `approach_deadlock` — rewrite the feature scope or acceptance criteria, then re-start
 - `repeated_failure` — review findings, consider splitting the feature or adjusting DoD
 - `blocked` / `needs_replan` — escalate to Planner for re-scoping
-- `no completion signal from implementer` — check worker health via `get-worker-status`
-
-You do NOT need to message workers during the autonomous loop. Only intervene after escalation.
+- `missing_context` — check worker health via `get-worker-status`
 
 ---
 
 ## Escalation Handling
 
-On startup and after any feature runner completes, check for open escalations:
+On startup and after any feature execution completes, check for open escalations:
 
 ```bash
 bun run .floe/scripts/escalation.ts list --status open

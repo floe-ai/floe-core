@@ -6,6 +6,7 @@ import { loadDod, formatDodForPrompt } from "../dod.ts";
 import type { WorkerConfig, WorkerProvider, WorkerRole, WorkerSession } from "../types.ts";
 import type { ProviderAdapter } from "../adapters/interface.ts";
 import { DaemonStore } from "./store.ts";
+import { FeatureWorkflowEngine } from "./feature-workflow.ts";
 import type {
   CallBlockingPayload,
   CallDetectOrphanedPayload,
@@ -28,6 +29,16 @@ import type {
   WorkerStartPayload,
   WorkerStopPayload,
 } from "./types.ts";
+
+export interface RunFeaturePayload {
+  featureId: string;
+  implProvider?: string;
+  revProvider?: string;
+  epicId?: string;
+  releaseId?: string;
+  srcRoot?: string;
+  budgets?: Record<string, unknown>;
+}
 
 interface FloeConfig {
   defaultProvider: string;
@@ -63,6 +74,7 @@ export class DaemonService {
   private projectRoot: string;
   private socketPath: string;
   private startedAt: string;
+  private workflowEngine: FeatureWorkflowEngine;
 
   constructor(projectRoot: string, socketPath: string) {
     this.projectRoot = projectRoot;
@@ -70,6 +82,12 @@ export class DaemonService {
     this.registry = new SessionRegistry(projectRoot);
     this.store = new DaemonStore(projectRoot);
     this.startedAt = nowIso();
+
+    this.workflowEngine = new FeatureWorkflowEngine(
+      projectRoot,
+      this.store,
+      (workerId, message) => this.sendMessageToWorker(workerId, message),
+    );
 
     this.store.saveMeta({
       pid: process.pid,
@@ -104,6 +122,9 @@ export class DaemonService {
           return this.ok(await this.runEscalate(payload.runId as string, payload.reason as string | undefined));
         case "run.get":
           return this.ok(await this.runGet(payload as unknown as RunGetPayload));
+
+        case "run.feature":
+          return this.ok(await this.runFeature(payload as unknown as RunFeaturePayload));
 
         case "worker.start":
           return this.ok(await this.workerStart(payload as unknown as WorkerStartPayload));
@@ -338,6 +359,118 @@ export class DaemonService {
       workers: this.store.listWorkers(payload.runId),
       calls: this.store.listCalls(payload.runId),
     };
+  }
+
+  /**
+   * Daemon-native feature execution. Creates a run, starts implementer + reviewer
+   * workers, and kicks off the FeatureWorkflowEngine. No external subprocess needed.
+   */
+  private async runFeature(payload: RunFeaturePayload): Promise<Record<string, unknown>> {
+    if (!payload.featureId) throw new Error("run.feature requires featureId");
+
+    // Create the run
+    const runResult = await this.runStart({
+      type: "feature_execution",
+      objective: `Execute feature ${payload.featureId}`,
+      state: "initialising",
+      metadata: {
+        featureId: payload.featureId,
+        epicId: payload.epicId ?? null,
+        releaseId: payload.releaseId ?? null,
+      },
+    });
+    const run = (runResult as any).run as RunRecord;
+
+    // Build implementer context addendum
+    let implAddendum: string | undefined;
+    if (payload.srcRoot) {
+      implAddendum = [
+        "\n## Source Root\n",
+        `All application source code for the project under development must be written to the \`${payload.srcRoot}/\` directory (relative to the project root).`,
+        `This directory has been configured as the project's source root.`,
+        `Do NOT write application files into the .floe framework directory or the project root directly.`,
+      ].join("\n");
+    }
+
+    // Start implementer
+    const implResult = await this.workerStart({
+      runId: run.runId,
+      role: "implementer" as WorkerRole,
+      provider: payload.implProvider as WorkerProvider | undefined,
+      featureId: payload.featureId,
+      epicId: payload.epicId,
+      releaseId: payload.releaseId,
+      contextAddendum: implAddendum,
+    } as WorkerStartPayload);
+    const implWorkerId = (implResult as any).workerId as string;
+    if (!implWorkerId) {
+      await this.runEscalate(run.runId, "Implementer launch failed");
+      throw new Error("Implementer launch failed — no workerId returned");
+    }
+
+    // Start reviewer
+    const revResult = await this.workerStart({
+      runId: run.runId,
+      role: "reviewer" as WorkerRole,
+      provider: payload.revProvider as WorkerProvider | undefined,
+      featureId: payload.featureId,
+      epicId: payload.epicId,
+      releaseId: payload.releaseId,
+    } as WorkerStartPayload);
+    const revWorkerId = (revResult as any).workerId as string;
+    if (!revWorkerId) {
+      await this.runEscalate(run.runId, "Reviewer launch failed");
+      throw new Error("Reviewer launch failed — no workerId returned");
+    }
+
+    // Start workflow engine (runs asynchronously in-process)
+    const workflowState = await this.workflowEngine.start(
+      payload.featureId,
+      run.runId,
+      implWorkerId,
+      revWorkerId,
+    );
+
+    return {
+      featureId: payload.featureId,
+      runId: run.runId,
+      implementer: { workerId: implWorkerId },
+      reviewer: { workerId: revWorkerId },
+      workflow: workflowState,
+    };
+  }
+
+  /**
+   * Internal helper: send a message to a worker via the provider adapter.
+   * Used by FeatureWorkflowEngine as its sendMessage callback.
+   */
+  private async sendMessageToWorker(
+    workerId: string,
+    message: string,
+  ): Promise<{ ok: boolean; content?: string; error?: string }> {
+    try {
+      const stored = this.getStoredWorker(workerId);
+      const adapter = this.getAdapter(stored.provider);
+      await this.ensureResumed(adapter, workerId, stored);
+
+      const result = await adapter.sendMessage(workerId, message);
+      const fresh = adapter.getSession(workerId);
+      this.registry.update(workerId, { lastMessageAt: nowIso(), metadata: fresh?.metadata });
+
+      const runtimeWorker = this.store.getWorker(workerId);
+      if (runtimeWorker) {
+        this.store.upsertWorker({
+          ...runtimeWorker,
+          state: "active",
+          updatedAt: nowIso(),
+          lastMessageAt: nowIso(),
+        });
+      }
+
+      return { ok: true, content: result.content };
+    } catch (error: any) {
+      return { ok: false, error: error?.message ?? String(error) };
+    }
   }
 
   private async workerStart(payload: WorkerStartPayload): Promise<Record<string, unknown>> {

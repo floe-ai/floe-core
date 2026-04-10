@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://floe.ai/schemas/escalation.json",
   "title": "Escalation",
-  "description": "A structured escalation record. Created when the feature runner or a worker encounters a condition that cannot be resolved autonomously.",
+  "description": "A structured escalation record. Created when the daemon workflow engine or a worker encounters a condition that cannot be resolved autonomously.",
   "type": "object",
   "required": ["id", "source_role", "feature_id", "reason_class", "description", "status", "created_at"],
   "properties": {
@@ -12,7 +12,7 @@
     },
     "source_role": {
       "type": "string",
-      "enum": ["implementer", "reviewer", "planner", "feature-runner"],
+      "enum": ["implementer", "reviewer", "planner", "feature-runner", "daemon"],
       "description": "Which role or system component created this escalation"
     },
     "source_session_id": {

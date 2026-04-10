@@ -157,7 +157,7 @@ The Reviewer will evaluate your work against these same criteria.
 
 ## Resolution Thread
 
-If your approach is rejected, the feature runner enters a **resolution phase**. You communicate with the reviewer through a structured resolution thread — not direct messages.
+If your approach is rejected, the daemon workflow engine enters a **resolution phase**. You communicate with the reviewer through a structured resolution thread — not direct messages.
 
 ### Commands
 - **Revise your approach:** `bun run .floe/scripts/review.ts add-resolution <rev_id> --from implementer --kind revised_approach '<your revised approach>'`
@@ -171,7 +171,7 @@ bun run .floe/scripts/artefact.ts update feature <featureId> --data '{"execution
 ```
 Without this signal, the runner will escalate with "no completion signal."
 
-You are in an autonomous loop — the feature runner reads your artefact changes and advances the workflow automatically.
+You are in an autonomous loop — the daemon workflow engine reads your artefact changes and advances the workflow automatically.
 
 ---
 
