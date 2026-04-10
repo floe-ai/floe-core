@@ -17,6 +17,8 @@ const { values } = parseArgs({
   args: Bun.argv.slice(2),
   options: {
     "project-root": { type: "string" },
+    "remote": { type: "string" },       // e.g. https://github.com/org/repo.git or git@github.com:org/repo.git
+    "branch": { type: "string" },       // default branch name, defaults to "main"
   },
   strict: false,
 });
@@ -149,9 +151,72 @@ if (!existsSync(stateFile)) {
 
 const hasMem = floeMemAvailable();
 
+// ── Set up remote, credential helper, initial commit + push ──────────
+
+const remoteUrl = values["remote"] as string | undefined;
+const branchName = (values["branch"] as string | undefined) || "main";
+let remoteSetup: { ok: boolean; remote?: string; branch?: string; pushed?: boolean; error?: string } | null = null;
+
+if (remoteUrl) {
+  try {
+    // Ensure we are on the right branch
+    const currentBranch = Bun.spawnSync(["git", "rev-parse", "--abbrev-ref", "HEAD"], {
+      cwd: p.root, stdout: "pipe", stderr: "ignore",
+    });
+    const currentBranchName = currentBranch.stdout.toString().trim();
+    if (currentBranchName !== branchName && currentBranchName !== "HEAD") {
+      Bun.spawnSync(["git", "branch", "-M", branchName], { cwd: p.root, stdout: "ignore", stderr: "ignore" });
+    } else if (currentBranchName === "HEAD") {
+      // No commits yet — we need at least one commit before renaming
+    }
+
+    // Add or update origin remote
+    const existingRemotes = Bun.spawnSync(["git", "remote"], { cwd: p.root, stdout: "pipe", stderr: "ignore" });
+    const remotes = existingRemotes.stdout.toString().trim().split("\n").filter(Boolean);
+    if (remotes.includes("origin")) {
+      Bun.spawnSync(["git", "remote", "set-url", "origin", remoteUrl], { cwd: p.root, stdout: "ignore", stderr: "ignore" });
+    } else {
+      Bun.spawnSync(["git", "remote", "add", "origin", remoteUrl], { cwd: p.root, stdout: "ignore", stderr: "ignore" });
+    }
+
+    // Configure credential helper for HTTPS remotes so subsequent pushes are not prompted
+    if (remoteUrl.startsWith("https://")) {
+      const helper = process.platform === "darwin" ? "osxkeychain"
+        : process.platform === "win32" ? "wincred"
+        : "store";
+      Bun.spawnSync(["git", "config", "credential.helper", helper], { cwd: p.root, stdout: "ignore", stderr: "ignore" });
+    }
+
+    // Stage everything and make the initial commit (if working tree is dirty)
+    const statusResult = Bun.spawnSync(["git", "status", "--porcelain"], { cwd: p.root, stdout: "pipe", stderr: "ignore" });
+    const hasPendingChanges = statusResult.stdout.toString().trim().length > 0;
+    if (hasPendingChanges) {
+      Bun.spawnSync(["git", "add", "-A"], { cwd: p.root, stdout: "ignore", stderr: "ignore" });
+      Bun.spawnSync(["git", "commit", "-m", "chore: initialise floe framework structure"], {
+        cwd: p.root, stdout: "ignore", stderr: "ignore",
+        env: { ...process.env },
+      });
+    }
+
+    // Push and set upstream tracking
+    const pushResult = Bun.spawnSync(["git", "push", "-u", "origin", branchName], {
+      cwd: p.root, stdout: "pipe", stderr: "pipe",
+      env: { ...process.env },
+    });
+    if (pushResult.exitCode === 0) {
+      remoteSetup = { ok: true, remote: remoteUrl, branch: branchName, pushed: true };
+    } else {
+      remoteSetup = { ok: false, remote: remoteUrl, error: pushResult.stderr.toString().trim() || "push failed" };
+    }
+  } catch (e: any) {
+    remoteSetup = { ok: false, remote: remoteUrl, error: e?.message ?? "unknown error" };
+  }
+}
+
 ok("Framework initialised", {
   project_root: p.root,
   git_initialised: gitInitialised,
+  remote_setup: remoteSetup,
   directories_created: created,
   floe_mem_detected: hasMem,
 });

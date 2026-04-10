@@ -141,6 +141,34 @@ function tryCompleteEpic(featureId: string): void {
   );
 }
 
+// ── Git helpers ──────────────────────────────────────────────────────
+
+/**
+ * Stage all changes, commit with the given message, and push if a remote
+ * is configured. Non-fatal — git errors are silently ignored so they never
+ * block the feature runner.
+ */
+function gitCommitAndPush(message: string): void {
+  // Stage everything
+  const addResult = Bun.spawnSync(["git", "add", "-A"], { cwd: p.root, stdout: "ignore", stderr: "ignore" });
+  if (addResult.exitCode !== 0) return;
+
+  // Only commit if there are staged changes
+  const statusResult = Bun.spawnSync(["git", "status", "--porcelain"], { cwd: p.root, stdout: "pipe", stderr: "ignore" });
+  if (!statusResult.stdout.toString().trim()) return;
+
+  Bun.spawnSync(
+    ["git", "commit", "-m", message],
+    { cwd: p.root, stdout: "ignore", stderr: "ignore", env: { ...process.env } },
+  );
+
+  // Push only if a remote is configured
+  const remoteCheck = Bun.spawnSync(["git", "remote"], { cwd: p.root, stdout: "pipe", stderr: "ignore" });
+  if (remoteCheck.stdout.toString().trim()) {
+    Bun.spawnSync(["git", "push"], { cwd: p.root, stdout: "ignore", stderr: "ignore", env: { ...process.env } });
+  }
+}
+
 // ── Phase handlers (each tick does ONE action) ───────────────────────
 
 function tickAlignment(state: FeatureRunState): void {
@@ -692,6 +720,7 @@ switch (cmd) {
         { cwd: p.root, stdout: "ignore", stderr: "ignore" },
       );
       tryCompleteEpic(state.featureId);
+      gitCommitAndPush(`feat(${state.featureId}): implementation complete and reviewed`);
     }
 
     ok(`Feature run finished`, {

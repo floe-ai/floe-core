@@ -63,11 +63,37 @@ After reading runtime state (step 1 of startup), check provider configuration be
 
 | Mode | When | Action |
 |------|------|--------|
-| **initialise** | Framework missing or damaged | Run `bun run .floe/scripts/init.ts`, scaffold structure, initialise git repo |
+| **initialise** | Framework missing or damaged | Run `bun run .floe/scripts/init.ts`, scaffold structure, initialise git repo, optionally set up remote |
 | **discover** | New idea, bug, refinement, priority change | Classify, capture notes, create release only when intent is genuinely clear |
 | **plan** | Active release or epic needs decomposition | Launch Planner worker via `launch-worker --role planner --scope <level> --target <id>` |
 | **execute** | Active feature ready and approach approved | Launch Implementer + Reviewer workers via `manage-feature-pair` |
 | **review** | Feature/epic complete, failure, blocker | Summarise state, classify outcome, decide next action |
+
+### Initialise mode
+
+When `bun run .floe/scripts/state.ts get` fails or the `.floe/` directory is missing, run init:
+
+```bash
+bun run .floe/scripts/init.ts
+```
+
+After init returns `git_initialised: true`, **ask the user about remote setup before proceeding**:
+
+> "The framework is initialised and a local git repository is ready. Do you want to push this project to a remote (e.g. GitHub)? If yes, paste the repository URL and I'll configure the remote, set up credential storage, and push the initial commit. If you prefer to work locally for now, we can skip this."
+
+**If the user provides a remote URL:**
+```bash
+bun run .floe/scripts/init.ts --remote <url> [--branch main]
+```
+- For HTTPS remotes: configures `credential.helper` (osxkeychain on macOS, wincred on Windows, store on Linux) so subsequent pushes are never re-prompted
+- For SSH remotes: no credential setup needed — uses existing SSH key
+- Makes the initial commit and pushes with upstream tracking set
+
+Check `remote_setup.ok` in the response. If `ok: false`, surface the error to the user (common causes: auth failure, repo doesn't exist yet on the remote).
+
+**If the user skips the remote:** proceed normally. They can add a remote at any time by re-running `bun run .floe/scripts/init.ts --remote <url>`.
+
+**Auto-commit and push during execution:** Once a remote is configured, the feature runner automatically commits and pushes after each feature completes. No manual git management is needed.
 
 ### Discover mode scope
 
@@ -191,6 +217,11 @@ bun run .floe/scripts/note.ts create --data '{}'             # capture a note
 # Validation
 bun run .floe/scripts/validate.ts all                       # consistency check
 bun run .floe/scripts/review.ts get-for <feature_id>        # get active review for a feature
+
+# Initialisation
+bun run .floe/scripts/init.ts                               # scaffold structure + git init
+bun run .floe/scripts/init.ts --remote <url>                # also configure remote + push initial commit
+bun run .floe/scripts/init.ts --remote <url> --branch main  # specify default branch name
 ```
 
 **Epic and feature creation are Planner-only operations.** Do not use `artefact.ts create epic` or `artefact.ts create feature`.
