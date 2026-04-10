@@ -239,6 +239,13 @@ bun run .floe/bin/floe.ts launch-worker --role planner --scope intake --target <
 bun run .floe/bin/floe.ts launch-worker --role planner --scope <release|epic> --target <id> --message "<task>"
 bun run .floe/bin/floe.ts manage-feature-pair --feature <id>
 
+# Feature run — await pattern (preferred)
+bun run .floe/bin/floe.ts wait-feature-run --feature <id>                  # block until complete/escalated (default 1h timeout)
+bun run .floe/bin/floe.ts wait-feature-run --feature <id> --timeout 7200000 # custom timeout (ms)
+
+# Feature run — polling pattern (for very long runs or progress reporting)
+bun run .floe/bin/floe.ts feature-run-status --feature <id>                # snapshot of current state
+
 # Send messages to workers
 bun run .floe/bin/floe.ts message-worker --session <id> --message "<msg>"
 bun run .floe/bin/floe.ts message-worker --session <id> --message "<msg>" --async
@@ -339,19 +346,28 @@ bun run .floe/scripts/artefact.ts list epic
 
 ### Expected Flow: Execute Mode
 
+The feature runner is a background process. Use `wait-feature-run` to block until it finishes — this is the preferred, await-like pattern:
+
 ```bash
 # 1. Launch implementer + reviewer pair — autonomous runner starts in background
 bun run .floe/bin/floe.ts manage-feature-pair --feature feat-001
-# Returns: { ok: true, runId, runnerStarted: true, implementer: {...}, reviewer: {...} }
+# Returns immediately: { ok: true, runId, runnerStarted: true, implementer: {...}, reviewer: {...} }
 
-# 2. Poll until terminal (complete or escalated)
-bun run .floe/bin/floe.ts feature-run-status --feature feat-001
-# Returns phase, round, lastAction, outcome
+# 2. Await completion (blocks until phase is "complete" or "escalated")
+bun run .floe/bin/floe.ts wait-feature-run --feature feat-001
+# Returns final state: { phase, outcome, round, ... }
 
-# 3. React only to terminal states
+# 3. React to the terminal state
 # phase: "complete"   → proceed to next feature
 # phase: "escalated"  → read escalationReason, surface to user, resolve before continuing
 ```
+
+`wait-feature-run` accepts `--timeout <ms>` (default 3 600 000 ms = 1 hour). For features you expect to take longer, pass a higher timeout. If it times out, `lastKnownState` in the response shows where the runner was — you can then poll with `feature-run-status` to continue monitoring.
+
+**Use `feature-run-status` (polling) only when:**
+- You need incremental progress updates to surface to the user mid-run
+- The feature is expected to run for several hours and you want to checkpoint between turns
+- You are resuming an already-running feature from a fresh conversation
 
 The feature runner drives the full alignment → implementation → review loop automatically. You do NOT need to message workers manually. Only intervene after escalation.
 
@@ -361,10 +377,34 @@ The feature runner drives the full alignment → implementation → review loop 
 
 When you launch a feature pair via `manage-feature-pair`, the **feature runner** starts automatically in the background. It drives the full alignment → resolution → implementation → review loop without your intervention.
 
-### Fire-and-poll pattern
-1. Launch: `bun run .floe/bin/floe.ts manage-feature-pair --feature <id>` — workers + runner start
-2. Poll: `bun run .floe/bin/floe.ts feature-run-status --feature <id>` — check phase/outcome
-3. React only to terminal states (`complete` or `escalated`)
+## Autonomous Feature Runner
+
+When you launch a feature pair via `manage-feature-pair`, the **feature runner** starts automatically in the background. It drives the full alignment → resolution → implementation → review loop without your intervention.
+
+### Preferred pattern: await
+
+```bash
+# 1. Launch workers + runner
+bun run .floe/bin/floe.ts manage-feature-pair --feature <id>
+
+# 2. Await — blocks until the runner reaches a terminal state
+bun run .floe/bin/floe.ts wait-feature-run --feature <id> [--timeout <ms>]
+# Returns: { ok: true, phase: "complete"|"escalated", outcome, ... }
+```
+
+This is the simplest flow. Treat the two commands together as a single async tool call.
+
+### Fallback: polling (use when await might time out)
+
+```bash
+# Check current progress without blocking
+bun run .floe/bin/floe.ts feature-run-status --feature <id>
+```
+
+Use polling when:
+- The feature is expected to run for several hours (beyond your provider's turn timeout)
+- You want to report progress to the user mid-run
+- You are resuming monitoring from a fresh conversation
 
 ### Handling escalation returns
 When `phase: "escalated"`, read `escalationReason`:

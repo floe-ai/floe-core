@@ -866,6 +866,47 @@ async function featureRunStatus(args: Record<string, any>) {
   }
 }
 
+/**
+ * Block until the feature runner reaches a terminal state (complete or escalated),
+ * then return the final state. Equivalent to awaiting a promise — the Foreman
+ * can call manage-feature-pair followed immediately by wait-feature-run and treat
+ * the whole thing as a single synchronous tool call.
+ *
+ * --timeout <ms>   Maximum wait time. Default: 3 600 000 ms (1 hour).
+ * --poll-ms <ms>   State-file poll interval. Default: 10 000 ms (10 s).
+ */
+async function waitFeatureRun(args: Record<string, any>) {
+  if (!args.feature) return { ok: false, error: "wait-feature-run requires --feature <id>" };
+
+  const timeoutMs = parseInt(args.timeout ?? "3600000", 10);
+  const pollMs    = parseInt(args["poll-ms"] ?? "10000", 10);
+  const statePath = join(projectRoot, ".floe", "state", "feature-runs", `${args.feature}.json`);
+  const TERMINAL  = ["complete", "escalated"];
+  const deadline  = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    if (existsSync(statePath)) {
+      try {
+        const state = JSON.parse(readFileSync(statePath, "utf-8"));
+        if (TERMINAL.includes(state.phase)) {
+          return { ok: true, ...state };
+        }
+      } catch { /* state file mid-write — retry */ }
+    }
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+
+  // Timed out — return last known state if available
+  let lastState: any = null;
+  try { if (existsSync(statePath)) lastState = JSON.parse(readFileSync(statePath, "utf-8")); } catch {}
+  return {
+    ok: false,
+    error: `Timed out after ${timeoutMs}ms waiting for feature run`,
+    feature: args.feature,
+    lastKnownState: lastState,
+  };
+}
+
 // ─── Escalation commands ─────────────────────────────────────────────
 
 async function listEscalations(args: Record<string, any>) {
@@ -1258,6 +1299,7 @@ async function main() {
     "manage-feature-pair": manageFeaturePair,
     "check-alignment": checkAlignment,
     "feature-run-status": featureRunStatus,
+    "wait-feature-run": waitFeatureRun,
     "show-dod": showDod,
     "edit-dod": editDod,
     "list-escalations": listEscalations,
