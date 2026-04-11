@@ -8,7 +8,7 @@
  *   bun run scripts/validate.ts state        # validate runtime state consistency
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
   paths, readJson, listArtefacts, validateArtefact, findArtefact,
@@ -26,7 +26,7 @@ interface Issue {
 }
 
 const REQUIRED_CANONICAL_FILES = [
-  ".floe/roles/foreman.md",
+  ".floe/roles/floe.md",
   ".floe/roles/planner.md",
   ".floe/roles/implementer.md",
   ".floe/roles/reviewer.md",
@@ -35,34 +35,6 @@ const REQUIRED_CANONICAL_FILES = [
   ".floe/skills/sizing-heuristics/SKILL.md",
   ".floe/schemas/dod.json",
 ] as const;
-
-const REQUIRED_PROVIDER_SKILLS = ["floe-exec", "floe-preflight", "sizing-heuristics"] as const;
-
-interface ProviderLayout {
-  name: string;
-  wrapperPath: string;
-  skillsRoot: string;
-}
-
-function collectProviderLayouts(): ProviderLayout[] {
-  return [
-    {
-      name: "codex",
-      wrapperPath: join(p.root, "AGENTS.md"),
-      skillsRoot: join(p.root, ".agents", "skills"),
-    },
-    {
-      name: "copilot",
-      wrapperPath: join(p.root, ".github", "agents", "foreman.agent.md"),
-      skillsRoot: join(p.root, ".github", "skills"),
-    },
-    {
-      name: "claude",
-      wrapperPath: join(p.root, ".claude", "agents", "foreman.md"),
-      skillsRoot: join(p.root, ".claude", "skills"),
-    },
-  ];
-}
 
 function validateFrameworkContract(issues: Issue[]): void {
   for (const relPath of REQUIRED_CANONICAL_FILES) {
@@ -101,63 +73,6 @@ function validateFrameworkContract(issues: Issue[]): void {
         type: "framework",
         message: "Unable to parse .floe/dod.json",
       });
-    }
-  }
-
-  for (const provider of collectProviderLayouts()) {
-    const providerInstalled =
-      existsSync(provider.wrapperPath)
-      || REQUIRED_PROVIDER_SKILLS.some((skill) => existsSync(join(provider.skillsRoot, skill, "SKILL.md")));
-    if (!providerInstalled) continue;
-
-    for (const skill of REQUIRED_PROVIDER_SKILLS) {
-      const skillPath = join(provider.skillsRoot, skill, "SKILL.md");
-      if (!existsSync(skillPath)) {
-        issues.push({
-          severity: "error",
-          type: "framework",
-          message: `Missing ${provider.name} skill: ${skillPath.replace(p.root + "/", "")}`,
-        });
-        continue;
-      }
-
-      let content = "";
-      try {
-        content = readFileSync(skillPath, "utf-8");
-      } catch {
-        issues.push({
-          severity: "error",
-          type: "framework",
-          message: `Unable to read ${provider.name} skill: ${skillPath.replace(p.root + "/", "")}`,
-        });
-        continue;
-      }
-
-      // Skill must contain real content — not a thin pointer stub
-      if (content.trim().length < 100) {
-        issues.push({
-          severity: "error",
-          type: "framework",
-          message: `${provider.name} skill appears empty or is a stub: ${skillPath.replace(p.root + "/", "")}`,
-        });
-        continue;
-      }
-
-      // Skill content must match the canonical source
-      const canonicalPath = join(p.root, ".floe", "skills", skill, "SKILL.md");
-      if (existsSync(canonicalPath)) {
-        let canonical = "";
-        try {
-          canonical = readFileSync(canonicalPath, "utf-8");
-        } catch { /* ignore — canonical read failure is caught in REQUIRED_CANONICAL_FILES check */ }
-        if (canonical && content !== canonical) {
-          issues.push({
-            severity: "warning",
-            type: "framework",
-            message: `${provider.name} skill out of sync with canonical: ${skillPath.replace(p.root + "/", "")} (re-run installer to update)`,
-          });
-        }
-      }
     }
   }
 }

@@ -33,7 +33,7 @@ You coordinate with other participants through the daemon's blocking-call system
 | Approach ready for review | `call-blocking --type request_approach_review --feature <featureId>` |
 | Implementation ready for code review | `call-blocking --type request_code_review --feature <featureId>` |
 | Review findings fixed, ready for re-review | `call-blocking --type revision_ready --feature <featureId>` |
-| Blocked by missing information from the user | `call-blocking --type request_foreman_clarification --data '{"question":"<what you need>"}'` |
+| Blocked by missing information from the user | `call-blocking --type request_floe_clarification --data '{"question":"<what you need>"}'` |
 
 All calls: `bun run .floe/bin/floe.ts call-blocking --run <runId> --worker <workerId> --type <type> --feature <featureId>`
 
@@ -150,5 +150,5 @@ bun run .floe/scripts/state.ts set-blocker <class> "<description>"
 
 - **Take the time you need.** Quality matters more than speed.
 - **Complete your work before responding.** Code, tests, summaries, state — all done before your final response.
-- **Write artefacts as you go.** The Foreman and Reviewer rely on artefacts, not response text.
-- **When blocked by missing information**, use `request_foreman_clarification` and wait. Do not guess and do not treat it as terminal unless clarification truly cannot resolve it.
+- **Write artefacts as you go.** Floe and the Reviewer rely on artefacts, not response text.
+- **When blocked by missing information**, use `request_floe_clarification` and wait. Do not guess and do not treat it as terminal unless clarification truly cannot resolve it.

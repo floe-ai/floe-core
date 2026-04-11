@@ -62,4 +62,4 @@ Merge when:
 
 - If unsure, start with one epic and one feature, then split only when execution evidence demands it.
 - Planner should stop after the requested decomposition scope.
-- Foreman should escalate ambiguous sizing decisions instead of guessing.
+- Floe should escalate ambiguous sizing decisions instead of guessing.

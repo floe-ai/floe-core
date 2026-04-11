@@ -9,7 +9,7 @@
  * Field naming: camelCase throughout, matching the runtime TypeScript types.
  *
  * Usage:
- *   bun run scripts/sessions.ts register --role <role> --provider <provider> --feature <id>
+ *   bun run scripts/sessions.ts register --role <role> --feature <id>
  *   bun run scripts/sessions.ts get <session_id>
  *   bun run scripts/sessions.ts update <session_id> --data '<json>'
  *   bun run scripts/sessions.ts set-status <session_id> <status>
@@ -26,8 +26,7 @@ import { paths, readJson, writeJson, generateId, timestamp, output, ok, fail } f
 const p = paths();
 const sessionsFile = join(p.state, "sessions.json");
 
-const ROLES = ["foreman", "planner", "implementer", "reviewer"] as const;
-const PROVIDERS = ["codex", "claude", "copilot"] as const;
+const ROLES = ["floe", "planner", "implementer", "reviewer"] as const;
 const STATUSES = ["starting", "active", "idle", "stopped", "failed"] as const;
 
 /** Normalise any legacy snake_case fields to camelCase. */
@@ -87,7 +86,6 @@ const { values, positionals } = parseArgs({
   args: Bun.argv.slice(2),
   options: {
     role: { type: "string" },
-    provider: { type: "string" },
     feature: { type: "string" },
     epic: { type: "string" },
     release: { type: "string" },
@@ -103,14 +101,10 @@ const [cmd, arg1] = positionals;
 switch (cmd) {
   case "register": {
     const role = values.role as string;
-    const provider = values.provider as string;
     const featureId = values.feature as string;
 
     if (!role || !ROLES.includes(role as any)) {
       fail(`--role required. Expected: ${ROLES.join(", ")}`);
-    }
-    if (!provider || !PROVIDERS.includes(provider as any)) {
-      fail(`--provider required. Expected: ${PROVIDERS.join(", ")}`);
     }
     if (!featureId) fail("--feature is required");
 
@@ -118,7 +112,6 @@ switch (cmd) {
     const session: Record<string, unknown> = {
       id: generateId("sess", `${role}-${featureId}-${Date.now().toString(36)}`),
       role,
-      provider,
       status: "starting",
       featureId,
       createdAt: now,
@@ -207,7 +200,6 @@ switch (cmd) {
       sessions: sessions.map((s) => ({
         id: s.id,
         role: s.role,
-        provider: s.provider,
         status: s.status,
         featureId: s.featureId,
         createdAt: s.createdAt,
@@ -225,7 +217,7 @@ switch (cmd) {
       ok: true,
       count: sessions.length,
       sessions: sessions.map((s) => ({
-        id: s.id, role: s.role, provider: s.provider, status: s.status, featureId: s.featureId,
+        id: s.id, role: s.role, status: s.status, featureId: s.featureId,
       })),
     });
     break;

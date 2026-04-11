@@ -675,7 +675,7 @@ function cmdContext(db: Database, args: string[]): object {
     implementer: 2200,
     reviewer: 2200,
     planner: 2600,
-    foreman: 2800,
+    floe: 2800,
   };
   const budget = budgetStr ? parseInt(budgetStr, 10) : budgets[profile] || 2200;
   const expandLinks_ = args.includes("--expand-links");

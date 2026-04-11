@@ -3,8 +3,8 @@ import { join } from "node:path";
 
 import { SessionRegistry } from "../registry.ts";
 import { loadDod, formatDodForPrompt } from "../dod.ts";
-import type { WorkerConfig, WorkerProvider, WorkerRole, WorkerSession } from "../types.ts";
-import type { ProviderAdapter } from "../adapters/interface.ts";
+import type { WorkerConfig, WorkerRole, WorkerSession } from "../types.ts";
+import type { SendOptions, MessageResult, WorkerStatus } from "../types.ts";
 import { DaemonStore } from "./store.ts";
 import { FeatureWorkflowEngine } from "./feature-workflow.ts";
 import type { WaiterRegistry } from "./worker-channel.ts";
@@ -33,8 +33,6 @@ import type {
 
 export interface RunFeaturePayload {
   featureId: string;
-  implProvider?: string;
-  revProvider?: string;
   epicId?: string;
   releaseId?: string;
   srcRoot?: string;
@@ -42,15 +40,28 @@ export interface RunFeaturePayload {
 }
 
 interface FloeConfig {
-  defaultProvider: string;
-  enabledProviders?: string[];
   configured?: boolean;
   srcRoot?: string;
   roles?: {
-    planner?: { provider?: string; model?: string; thinking?: string };
-    implementer?: { provider?: string; model?: string; thinking?: string };
-    reviewer?: { provider?: string; model?: string; thinking?: string };
+    planner?: { model?: string; thinking?: string };
+    implementer?: { model?: string; thinking?: string };
+    reviewer?: { model?: string; thinking?: string };
   };
+}
+
+/**
+ * SessionSubstrate — the interface the daemon uses to manage worker sessions.
+ * Pi will implement this as the sole session substrate.
+ */
+export interface SessionSubstrate {
+  hasSession(sessionId: string): boolean;
+  startSession(config: WorkerConfig): Promise<WorkerSession>;
+  resumeSession(sessionId: string, storedSession: WorkerSession, config?: Partial<WorkerConfig>): Promise<WorkerSession>;
+  sendMessage(sessionId: string, message: string, options?: SendOptions): Promise<MessageResult>;
+  getStatus(sessionId: string): Promise<WorkerStatus>;
+  getSession(sessionId: string): WorkerSession | undefined;
+  stopSession(sessionId: string): Promise<void>;
+  closeSession(sessionId: string): Promise<void>;
 }
 
 interface DaemonHandleResult {
@@ -69,8 +80,7 @@ function makeId(prefix: string): string {
 }
 
 export class DaemonService {
-  private adapters = new Map<string, ProviderAdapter>();
-  private adapterLoadErrors = new Map<string, string>();
+  private substrate: SessionSubstrate | null = null;
   private registry: SessionRegistry;
   private store: DaemonStore;
   private projectRoot: string;
@@ -100,11 +110,22 @@ export class DaemonService {
   }
 
   async init(): Promise<void> {
-    await this.loadLiveAdapters();
     // Export daemon endpoint so child processes (worker tool-call subshells) can
     // use the persistent socket channel instead of CLI polling.
     process.env.FLOE_DAEMON_ENDPOINT = this.socketPath;
     this.store.emitEvent({ type: "runtime.started", data: { pid: process.pid, socketPath: this.socketPath } });
+  }
+
+  /** Inject the session substrate (Pi). */
+  setSubstrate(substrate: SessionSubstrate): void {
+    this.substrate = substrate;
+  }
+
+  private getSubstrate(): SessionSubstrate {
+    if (!this.substrate) {
+      throw new Error("No session substrate configured. Pi substrate must be set via setSubstrate() before starting worker sessions.");
+    }
+    return this.substrate;
   }
 
   /** Inject the WaiterRegistry for push-based call resolution. */
@@ -224,38 +245,13 @@ export class DaemonService {
     return { ok: true, result };
   }
 
-  private async loadLiveAdapters(): Promise<void> {
-    try {
-      const { CodexAdapter } = await import("../adapters/codex.ts");
-      this.adapters.set("codex", new CodexAdapter());
-    } catch (error: any) {
-      this.adapterLoadErrors.set("codex", error?.message ?? String(error));
-    }
-
-    try {
-      const { ClaudeAdapter } = await import("../adapters/claude.ts");
-      this.adapters.set("claude", new ClaudeAdapter());
-    } catch (error: any) {
-      this.adapterLoadErrors.set("claude", error?.message ?? String(error));
-    }
-
-    try {
-      const { CopilotAdapter } = await import("../adapters/copilot.ts");
-      this.adapters.set("copilot", new CopilotAdapter());
-    } catch (error: any) {
-      this.adapterLoadErrors.set("copilot", error?.message ?? String(error));
-    }
-  }
-
-  private getAdapter(provider: string): ProviderAdapter {
-    const adapter = this.adapters.get(provider);
-    if (adapter) return adapter;
-
-    const loadError = this.adapterLoadErrors.get(provider);
-    if (loadError) {
-      throw new Error(`Adapter for '${provider}' failed to load: ${loadError}`);
-    }
-    throw new Error(`No adapter for provider '${provider}'`);
+  private resolveModel(role: WorkerRole): { model?: string; thinking?: string } {
+    const config = this.loadConfig();
+    const fromRole = config?.roles?.[role as keyof typeof config.roles];
+    return {
+      model: fromRole?.model,
+      thinking: fromRole?.thinking,
+    };
   }
 
   private loadConfig(): FloeConfig | null {
@@ -266,26 +262,6 @@ export class DaemonService {
     } catch {
       return null;
     }
-  }
-
-  private resolveProvider(role: WorkerRole, requestedProvider?: string): { provider: WorkerProvider; model?: string; thinking?: string } {
-    const config = this.loadConfig();
-
-    const fromRole = config?.roles?.[role];
-    const provider = (requestedProvider ?? fromRole?.provider ?? config?.defaultProvider ?? "") as WorkerProvider;
-    if (!provider) {
-      throw new Error("No provider configured for worker start. Set .floe/config.json or pass provider explicitly.");
-    }
-
-    if (config?.enabledProviders && !config.enabledProviders.includes(provider)) {
-      throw new Error(`Provider '${provider}' is not enabled. Enabled: [${config.enabledProviders.join(", ")}]`);
-    }
-
-    return {
-      provider,
-      model: fromRole?.model,
-      thinking: fromRole?.thinking,
-    };
   }
 
   private readRoleContent(role: WorkerRole): { content?: string; path?: string } {
@@ -313,8 +289,9 @@ export class DaemonService {
     return session;
   }
 
-  private async ensureResumed(adapter: ProviderAdapter, sessionId: string, stored: WorkerSession): Promise<void> {
-    if (adapter.hasSession(sessionId)) return;
+  private async ensureResumed(sessionId: string, stored: WorkerSession): Promise<void> {
+    const substrate = this.getSubstrate();
+    if (substrate.hasSession(sessionId)) return;
 
     let roleContent: string | undefined;
     if (stored.roleContentPath && existsSync(stored.roleContentPath)) {
@@ -325,7 +302,7 @@ export class DaemonService {
       }
     }
 
-    const resumed = await adapter.resumeSession(
+    const resumed = await substrate.resumeSession(
       sessionId,
       stored,
       roleContent ? { roleContent } : undefined,
@@ -336,7 +313,7 @@ export class DaemonService {
 
   private annotateRunFromCallType(run: RunRecord, callType: string): RunRecord {
     const next: RunRecord = { ...run, updatedAt: nowIso() };
-    if (callType === "request_foreman_clarification") next.state = "awaiting_foreman";
+    if (callType === "request_floe_clarification") next.state = "awaiting_floe";
     if (callType === "request_plan_review") next.state = "awaiting_plan_review";
     if (callType === "request_code_review") next.state = "awaiting_code_review";
     return next;
@@ -452,7 +429,6 @@ export class DaemonService {
     const implResult = await this.workerStart({
       runId: run.runId,
       role: "implementer" as WorkerRole,
-      provider: payload.implProvider as WorkerProvider | undefined,
       featureId: payload.featureId,
       epicId: payload.epicId,
       releaseId: payload.releaseId,
@@ -468,7 +444,6 @@ export class DaemonService {
     const revResult = await this.workerStart({
       runId: run.runId,
       role: "reviewer" as WorkerRole,
-      provider: payload.revProvider as WorkerProvider | undefined,
       featureId: payload.featureId,
       epicId: payload.epicId,
       releaseId: payload.releaseId,
@@ -497,7 +472,7 @@ export class DaemonService {
   }
 
   /**
-   * Internal helper: send a message to a worker via the provider adapter.
+   * Internal helper: send a message to a worker via the session substrate.
    * Used by FeatureWorkflowEngine as its sendMessage callback.
    */
   private async sendMessageToWorker(
@@ -506,11 +481,11 @@ export class DaemonService {
   ): Promise<{ ok: boolean; content?: string; error?: string }> {
     try {
       const stored = this.getStoredWorker(workerId);
-      const adapter = this.getAdapter(stored.provider);
-      await this.ensureResumed(adapter, workerId, stored);
+      const substrate = this.getSubstrate();
+      await this.ensureResumed(workerId, stored);
 
-      const result = await adapter.sendMessage(workerId, message);
-      const fresh = adapter.getSession(workerId);
+      const result = await substrate.sendMessage(workerId, message);
+      const fresh = substrate.getSession(workerId);
       this.registry.update(workerId, { lastMessageAt: nowIso(), metadata: fresh?.metadata });
 
       const runtimeWorker = this.store.getWorker(workerId);
@@ -533,9 +508,8 @@ export class DaemonService {
     const role = payload.role as WorkerRole | undefined;
     if (!role) throw new Error("worker.start requires role");
 
-    const providerResolution = this.resolveProvider(role, payload.provider as WorkerProvider | undefined);
-    const provider = providerResolution.provider;
-    const adapter = this.getAdapter(provider);
+    const substrate = this.getSubstrate();
+    const modelResolution = this.resolveModel(role);
 
     const { content: roleContent, path: roleContentPath } = this.readRoleContent(role);
 
@@ -550,25 +524,23 @@ export class DaemonService {
 
     const config: WorkerConfig = {
       role,
-      provider,
       featureId: payload.featureId ?? "unscoped",
       epicId: payload.epicId,
       releaseId: payload.releaseId,
       roleContent,
       roleContentPath,
       contextAddendum,
-      model: (payload.model as string | undefined) ?? providerResolution.model,
-      thinking: (payload.thinking as string | undefined) ?? providerResolution.thinking,
+      model: (payload.model as string | undefined) ?? modelResolution.model,
+      thinking: (payload.thinking as string | undefined) ?? modelResolution.thinking,
     };
 
-    const session = await adapter.startSession(config);
+    const session = await substrate.startSession(config);
     this.registry.register(session);
 
     const runtimeWorker: WorkerRuntimeRecord = {
       workerId: session.id,
       sessionId: session.id,
       role: session.role,
-      provider: session.provider,
       runId: payload.runId,
       state: "active",
       createdAt: nowIso(),
@@ -586,7 +558,7 @@ export class DaemonService {
       type: "worker.started",
       runId: payload.runId,
       workerId: session.id,
-      data: { role: session.role, provider: session.provider },
+      data: { role: session.role },
     });
 
     if (payload.runId) {
@@ -609,8 +581,8 @@ export class DaemonService {
 
     let initialResult: Record<string, unknown> | undefined;
     if (payload.initialMessage) {
-      const messageResult = await adapter.sendMessage(session.id, payload.initialMessage);
-      const fresh = adapter.getSession(session.id);
+      const messageResult = await substrate.sendMessage(session.id, payload.initialMessage);
+      const fresh = substrate.getSession(session.id);
       this.registry.update(session.id, { lastMessageAt: nowIso(), metadata: fresh?.metadata ?? session.metadata });
       this.store.upsertWorker({ ...runtimeWorker, lastMessageAt: nowIso(), updatedAt: nowIso() });
       initialResult = {
@@ -639,8 +611,7 @@ export class DaemonService {
     if (!workerId) throw new Error("worker.resume requires workerId or sessionRef");
 
     const stored = this.getStoredWorker(workerId);
-    const adapter = this.getAdapter(stored.provider);
-    await this.ensureResumed(adapter, workerId, stored);
+    await this.ensureResumed(workerId, stored);
 
     const existing = this.store.getWorker(workerId);
     const updated: WorkerRuntimeRecord = {
@@ -648,7 +619,6 @@ export class DaemonService {
         workerId,
         sessionId: workerId,
         role: stored.role,
-        provider: stored.provider,
         createdAt: nowIso(),
         retryCount: 0,
       }),
@@ -660,7 +630,7 @@ export class DaemonService {
     };
 
     this.store.upsertWorker(updated);
-    this.store.emitEvent({ type: "worker.resumed", runId: updated.runId, workerId, data: { provider: stored.provider } });
+    this.store.emitEvent({ type: "worker.resumed", runId: updated.runId, workerId });
 
     return { worker: updated, session: this.registry.get(workerId) };
   }
@@ -679,8 +649,8 @@ export class DaemonService {
     }
 
     const stored = this.getStoredWorker(payload.workerId);
-    const adapter = this.getAdapter(stored.provider);
-    await this.ensureResumed(adapter, payload.workerId, stored);
+    const substrate = this.getSubstrate();
+    await this.ensureResumed(payload.workerId, stored);
 
     const runtimeWorker = this.store.getWorker(payload.workerId);
     if (runtimeWorker?.state && runtimeWorker.state !== "waiting" && runtimeWorker.state !== "resolved") {
@@ -695,8 +665,8 @@ export class DaemonService {
       throw new Error(`worker.continue requires continuation text or call.responsePayload.message`);
     }
 
-    const result = await adapter.sendMessage(payload.workerId, continuation);
-    const fresh = adapter.getSession(payload.workerId);
+    const result = await substrate.sendMessage(payload.workerId, continuation);
+    const fresh = substrate.getSession(payload.workerId);
     this.registry.update(payload.workerId, { lastMessageAt: nowIso(), metadata: fresh?.metadata });
 
     const nextWorker: WorkerRuntimeRecord = {
@@ -704,7 +674,6 @@ export class DaemonService {
         workerId: payload.workerId,
         sessionId: payload.workerId,
         role: stored.role,
-        provider: stored.provider,
         createdAt: nowIso(),
         retryCount: 0,
       }),
@@ -769,10 +738,10 @@ export class DaemonService {
     if (!payload.workerId) throw new Error("worker.stop requires workerId");
 
     const stored = this.getStoredWorker(payload.workerId);
-    const adapter = this.getAdapter(stored.provider);
-    await this.ensureResumed(adapter, payload.workerId, stored).catch(() => {});
-    await adapter.stopSession(payload.workerId).catch(() => {});
-    await adapter.closeSession(payload.workerId).catch(() => {});
+    const substrate = this.getSubstrate();
+    await this.ensureResumed(payload.workerId, stored).catch(() => {});
+    await substrate.stopSession(payload.workerId).catch(() => {});
+    await substrate.closeSession(payload.workerId).catch(() => {});
 
     this.registry.setStatus(payload.workerId, "stopped");
 
@@ -782,7 +751,6 @@ export class DaemonService {
         workerId: payload.workerId,
         sessionId: payload.workerId,
         role: stored.role,
-        provider: stored.provider,
         createdAt: nowIso(),
         retryCount: 0,
       }),
@@ -821,16 +789,15 @@ export class DaemonService {
     const strategy = payload.strategy ?? "session";
 
     const stored = this.getStoredWorker(payload.workerId);
-    const adapter = this.getAdapter(stored.provider);
+    const substrate = this.getSubstrate();
 
-    if (strategy === "warm" && adapter.hasSession(payload.workerId)) {
+    if (strategy === "warm" && substrate.hasSession(payload.workerId)) {
       const runtimeWorker = this.store.getWorker(payload.workerId);
       const updated: WorkerRuntimeRecord = {
         ...(runtimeWorker ?? {
           workerId: payload.workerId,
           sessionId: payload.workerId,
           role: stored.role,
-          provider: stored.provider,
           createdAt: nowIso(),
           retryCount: 0,
         }),
@@ -839,20 +806,19 @@ export class DaemonService {
         retryCount: (runtimeWorker?.retryCount ?? 0) + 1,
       };
       this.store.upsertWorker(updated);
-      this.store.emitEvent({ type: "provider.resumed", runId: updated.runId, workerId: payload.workerId, data: { strategy } });
+      this.store.emitEvent({ type: "session.resumed", runId: updated.runId, workerId: payload.workerId, data: { strategy } });
       return { strategy, worker: updated, recovered: true };
     }
 
     if (strategy === "session" || strategy === "warm") {
       try {
-        await this.ensureResumed(adapter, payload.workerId, stored);
+        await this.ensureResumed(payload.workerId, stored);
         const runtimeWorker = this.store.getWorker(payload.workerId);
         const updated: WorkerRuntimeRecord = {
           ...(runtimeWorker ?? {
             workerId: payload.workerId,
             sessionId: payload.workerId,
             role: stored.role,
-            provider: stored.provider,
             createdAt: nowIso(),
             retryCount: 0,
           }),
@@ -862,7 +828,7 @@ export class DaemonService {
           retryCount: (runtimeWorker?.retryCount ?? 0) + 1,
         };
         this.store.upsertWorker(updated);
-        this.store.emitEvent({ type: "provider.resumed", runId: updated.runId, workerId: payload.workerId, data: { strategy: "session" } });
+        this.store.emitEvent({ type: "session.resumed", runId: updated.runId, workerId: payload.workerId, data: { strategy: "session" } });
         return { strategy: "session", worker: updated, recovered: true };
       } catch (error: any) {
         if (strategy !== "warm") throw error;
@@ -870,9 +836,8 @@ export class DaemonService {
     }
 
     const { content: roleContent, path: roleContentPath } = this.readRoleContent(stored.role);
-    const recoveredSession = await adapter.startSession({
+    const recoveredSession = await substrate.startSession({
       role: stored.role,
-      provider: stored.provider,
       featureId: stored.featureId,
       epicId: stored.epicId,
       releaseId: stored.releaseId,
@@ -889,7 +854,6 @@ export class DaemonService {
       workerId: recoveredSession.id,
       sessionId: recoveredSession.id,
       role: recoveredSession.role,
-      provider: recoveredSession.provider,
       runId: payload.runId ?? originalRuntimeWorker?.runId,
       state: "active",
       createdAt: nowIso(),
@@ -911,7 +875,7 @@ export class DaemonService {
     }
 
     this.store.emitEvent({
-      type: "provider.resumed",
+      type: "session.resumed",
       runId: recoveredRuntimeWorker.runId,
       workerId: recoveredSession.id,
       data: { strategy: "artefact", recoveredFrom: payload.workerId },
@@ -970,7 +934,6 @@ export class DaemonService {
         workerId: payload.workerId,
         sessionId: payload.workerId,
         role: stored.role,
-        provider: stored.provider,
         createdAt: nowIso(),
         retryCount: 0,
       }),
@@ -1001,9 +964,9 @@ export class DaemonService {
       data: { callType: payload.callType },
     });
 
-    if (payload.callType === "request_foreman_clarification") {
+    if (payload.callType === "request_floe_clarification") {
       this.store.emitEvent({
-        type: "run.awaiting_foreman",
+        type: "run.awaiting_floe",
         runId: payload.runId,
         workerId: payload.workerId,
         callId,
@@ -1136,15 +1099,15 @@ export class DaemonService {
     if (!payload.message) throw new Error("route.send requires message");
 
     const stored = this.getStoredWorker(payload.to);
-    const adapter = this.getAdapter(stored.provider);
-    await this.ensureResumed(adapter, payload.to, stored);
+    const substrate = this.getSubstrate();
+    await this.ensureResumed(payload.to, stored);
 
     const fullMessage = payload.context
       ? `${payload.message}\n\n[Sidecar context]\n${JSON.stringify(payload.context, null, 2)}`
       : payload.message;
 
-    const result = await adapter.sendMessage(payload.to, fullMessage);
-    const fresh = adapter.getSession(payload.to);
+    const result = await substrate.sendMessage(payload.to, fullMessage);
+    const fresh = substrate.getSession(payload.to);
     this.registry.update(payload.to, { lastMessageAt: nowIso(), metadata: fresh?.metadata });
 
     const runtimeWorker = this.store.getWorker(payload.to);

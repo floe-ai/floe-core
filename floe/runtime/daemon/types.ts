@@ -1,4 +1,4 @@
-import type { WorkerConfig, WorkerProvider, WorkerRole } from "../types.ts";
+import type { WorkerConfig, WorkerRole } from "../types.ts";
 
 export type RuntimeRunState =
   | "initialising"
@@ -8,7 +8,7 @@ export type RuntimeRunState =
   | "implementing"
   | "awaiting_code_review"
   | "code_revision"
-  | "awaiting_foreman"
+  | "awaiting_floe"
   | "completed"
   | "escalated"
   | "cancelled"
@@ -65,7 +65,6 @@ export interface WorkerRuntimeRecord {
   workerId: string;
   sessionId: string;
   role: WorkerRole;
-  provider: WorkerProvider;
   runId?: string;
   state: RuntimeWorkerState;
   pendingCallId?: string;

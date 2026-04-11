@@ -2,15 +2,15 @@
 
 This document defines source-of-truth boundaries for `floe-core`.
 
-## Canonical Install Payload
+## Canonical Product Payload
 
-Everything under `floe/` is installable product payload.
+Everything under `floe/` is the product engine — globally installed.
 
-- `floe/roles/` is the canonical role source.
+- `floe/roles/` is the canonical role source (floe, planner, implementer, reviewer).
 - `floe/skills/` is the canonical skill source.
 - `floe/schemas/`, `floe/scripts/`, `floe/runtime/`, and `floe/bin/` are canonical runtime/tooling sources.
 
-Installer rule: `.floe/` in consumer repos must be derived from this tree.
+These are loaded by the Floe runtime as part of its global config. They are not copied into each project.
 
 ## Non-Canonical Project Files
 
@@ -19,32 +19,21 @@ Anything outside `floe/` is repository build/support context unless explicitly d
 - `scripts/` (repo root) contains installer and packaging logic.
 - `docs/` contains design docs and operating notes.
 
-These directories are not copied wholesale into consumer `.floe/` installs.
+## Skill Loading Model
 
-## Skill Installation Contract
+Canonical Floe skills are part of the global Floe runtime. They are loaded by the runtime and available to agents automatically.
 
-Provider-visible skills are installed as **full text copies** of the canonical SKILL.md.
+- Canonical skills: `floe-exec`, `floe-preflight`, `sizing-heuristics`
+- Project-local overrides: `.floe/skills/<skill-name>/SKILL.md` — opt-in, completely replaces the global version for that project
 
-- Source of truth: `.floe/skills/<skill-name>/SKILL.md`
-- Installed copies (full content, not pointer stubs):
-  - Codex: `.agents/skills/<skill-name>/SKILL.md`
-  - Copilot: `.github/skills/<skill-name>/SKILL.md`
-  - Claude: `.claude/skills/<skill-name>/SKILL.md`
-
-Installable skills: `floe-exec`, `floe-preflight`, `sizing-heuristics`.
-
-Scripts and executables referenced by skills remain canonical under `.floe/` and are **not** duplicated into provider folders.
-
-## Agent Wrapper Contract
-
-Provider agent wrappers are **thin headers only** — they identify the Foreman role and point to `.floe/roles/foreman.md`. All behavioural content lives in the canonical role file.
+Scripts and executables referenced by skills are part of the Floe runtime and are never duplicated per-project.
 
 ## Session ID Contract
 
 Worker session IDs include the role as a prefix for log readability:
 
-- Format: `<role>-<provider>-<timestamp>-<random>`
-- Example: `implementer-copilot-m5x8k2-a7b3c9`
+- Format: `<role>-<timestamp>-<random>`
+- Example: `implementer-m5x8k2-a7b3c9`
 
 ## Context Memory Contract
 

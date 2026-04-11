@@ -2,14 +2,14 @@
 name: floe-preflight
 description: >
   Setup and readiness checks for the Floe execution framework. Handles first-run
-  initialisation, provider configuration, git setup, remote configuration, and
+  initialisation, model configuration, git setup, remote configuration, and
   repo-readiness validation. Invoked automatically on first conversation or when
-  readiness is missing. After preflight completes, hand off to Foreman for
+  readiness is missing. After preflight completes, hand off to floe for
   normal feature work.
   Keywords: setup, init, configure, preflight, bootstrap, onboarding, git, remote,
-  provider, model, readiness.
+  model, readiness.
 license: MIT
-compatibility: Requires Bun (https://bun.sh). Works with Codex, Copilot, and Claude Code.
+compatibility: Requires Bun (https://bun.sh).
 ---
 
 # Floe Preflight Skill
@@ -19,12 +19,12 @@ compatibility: Requires Bun (https://bun.sh). Works with Codex, Copilot, and Cla
 Use this skill when the system is **not yet ready for normal feature work**:
 
 - Framework not installed (`.floe/` missing or damaged)
-- Provider configuration missing or incomplete (`configured: false`)
+- Configuration missing or incomplete (`configured: false`)
 - Git repository not initialised
 - Remote not configured (when the user wants one)
-- Any pre-condition for normal Foreman operation is unmet
+- Any pre-condition for normal floe operation is unmet
 
-This skill is **not loaded during normal feature execution**. The Foreman invokes it only when readiness checks fail.
+This skill is **not loaded during normal feature execution**. Floe invokes it only when readiness checks fail.
 
 ## Readiness check sequence
 
@@ -66,58 +66,44 @@ Check `remote_setup.ok` in the response. If `false`, surface the error.
 
 If the user skips: proceed. They can add a remote later with `bun run .floe/scripts/init.ts --remote <url>`.
 
-### 3. Provider configuration
+### 3. Model configuration
 
 ```bash
 bun run .floe/bin/floe.ts show-config
 ```
 
-If config is missing, `configured` is `false`, or `enabledProviders` is unset:
+If config is missing or `configured` is `false`:
 
 ```bash
 bun run .floe/bin/floe.ts configure
 ```
 
-This returns which provider SDKs are installed and detected.
-
-**You ARE the model discovery.** You are running inside a provider (Copilot, Codex, or Claude). You can see your own available models. Present those to the user:
-
-> "I'm running on claude-opus-4.6 via Copilot. I can also see gpt-5.4, claude-sonnet-4.6, etc. For worker sessions, I'd recommend [model] because [reason]. Want to go with that, or type a different model name?"
-
-Once the user agrees:
+Present the user with model options and recommend a default. Once the user agrees:
 
 ```bash
-bun run .floe/bin/floe.ts configure --default-provider <provider> --enabled-providers <csv> --model <model> --thinking <level>
+bun run .floe/bin/floe.ts configure --model <model> --thinking <level>
 ```
 
 **Rules:**
-- Do not present hardcoded model lists. Present what you can see.
+- Model names are free text — the Pi substrate validates them at session creation time.
 - Do not drive a TUI wizard. The configure command is a data endpoint. You own the UX.
-- Model names are free text — the provider SDK validates them at session creation time.
 
-### 4. Role-specific provider validation
-
-Confirm all role-specific provider overrides (if any) are within the enabled set. If a role maps to a disabled provider, tell the user.
-
-### 5. Readiness confirmation
+### 4. Readiness confirmation
 
 When all checks pass, emit a clear completion state:
 
 > "Setup complete. Repo ready. Runtime configured. Feature work can begin."
 
-If the provider supports agent switching/handoff, hand off to the Foreman agent. If not, tell the user to switch.
-
 ## Re-invocation
 
-This skill can be re-invoked at any time if readiness is lost (e.g. config wiped after reinstall). Any role encountering a readiness failure should surface the problem — the Foreman then invokes preflight to restore readiness.
+This skill can be re-invoked at any time if readiness is lost (e.g. config wiped after reinstall). Any role encountering a readiness failure should surface the problem — floe then invokes preflight to restore readiness.
 
-## Provider & model configuration changes (runtime)
+## Model configuration changes (runtime)
 
-When the user mentions a model, provider, or thinking level in plain text during normal operation:
+When the user mentions a model or thinking level in plain text during normal operation:
 
 1. Check current config: `bun run .floe/bin/floe.ts show-config`
-2. Match to a model you can see (e.g. "opus" → `claude-opus-4.6`)
-3. Apply: `bun run .floe/bin/floe.ts update-config --role <role|all> --model <exact-id> [--thinking <level>]`
-4. Confirm what changed.
+2. Apply: `bun run .floe/bin/floe.ts update-config --role <role|all> --model <exact-id> [--thinking <level>]`
+3. Confirm what changed.
 
-If ambiguous, present visible models and ask. If no config exists, run the full preflight flow.
+If no config exists, run the full preflight flow.

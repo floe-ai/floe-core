@@ -61,7 +61,7 @@ export const CALL_TYPES = {
   APPROACH_REVIEW: "request_approach_review",
   CODE_REVIEW: "request_code_review",
   REVISION_READY: "revision_ready",
-  FOREMAN_CLARIFICATION: "request_foreman_clarification",
+  FLOE_CLARIFICATION: "request_floe_clarification",
 } as const;
 
 // ── Artefact helpers (file I/O, no daemon dependency) ────────────────
@@ -324,11 +324,11 @@ export class FeatureWorkflowEngine {
       case CALL_TYPES.REVISION_READY:
         await this.dispatchRevisionReady(state, callId);
         break;
-      case CALL_TYPES.FOREMAN_CLARIFICATION:
-        // run.awaiting_foreman event already emitted by service.ts callBlocking()
-        state.lastAction = "awaiting-foreman";
-        state.lastActionResult = "waiting for foreman to resolve clarification";
-        this.emitProgress(state, "awaiting_foreman");
+      case CALL_TYPES.FLOE_CLARIFICATION:
+        // run.awaiting_floe event already emitted by service.ts callBlocking()
+        state.lastAction = "awaiting-floe";
+        state.lastActionResult = "waiting for floe to resolve clarification";
+        this.emitProgress(state, "awaiting_floe");
         break;
     }
   }
@@ -485,10 +485,10 @@ export class FeatureWorkflowEngine {
       case CALL_TYPES.REVISION_READY:
         await this.onCodeReviewResolved(state, response);
         break;
-      case CALL_TYPES.FOREMAN_CLARIFICATION:
-        state.lastAction = "foreman-responded";
-        state.lastActionResult = "foreman clarification resolved — pushed to worker via persistent channel";
-        this.emitProgress(state, "foreman_clarification_resolved");
+      case CALL_TYPES.FLOE_CLARIFICATION:
+        state.lastAction = "floe-responded";
+        state.lastActionResult = "floe clarification resolved — pushed to worker via persistent channel";
+        this.emitProgress(state, "floe_clarification_resolved");
         break;
     }
   }

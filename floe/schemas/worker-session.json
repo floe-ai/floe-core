@@ -4,21 +4,16 @@
   "title": "Worker Session",
   "description": "A single worker session entry in the runtime session registry. Lives under .floe/state/sessions.json. This is runtime bookkeeping only — not the durable source of truth.",
   "type": "object",
-  "required": ["id", "role", "provider", "status", "featureId", "createdAt"],
+  "required": ["id", "role", "status", "featureId", "createdAt"],
   "properties": {
     "id": {
       "type": "string",
-      "description": "Unique session identifier (provider-prefixed, e.g. claude-abc123)"
+      "description": "Unique session identifier"
     },
     "role": {
       "type": "string",
-      "enum": ["foreman", "planner", "implementer", "reviewer"],
+      "enum": ["floe", "planner", "implementer", "reviewer"],
       "description": "Which canonical role this worker is running"
-    },
-    "provider": {
-      "type": "string",
-      "enum": ["codex", "claude", "copilot"],
-      "description": "Provider runtime backing this session"
     },
     "status": {
       "type": "string",
@@ -63,7 +58,7 @@
     },
     "metadata": {
       "type": "object",
-      "description": "Adapter-specific metadata (e.g. thread IDs, conversation history pointers)",
+      "description": "Runtime metadata (e.g. thread IDs, conversation history pointers)",
       "additionalProperties": true
     }
   },

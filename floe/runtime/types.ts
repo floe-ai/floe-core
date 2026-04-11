@@ -1,14 +1,12 @@
 /**
- * Shared types for the floe-runtime MCP server.
+ * Shared types for the floe runtime.
  */
 
-export type WorkerRole = "foreman" | "planner" | "implementer" | "reviewer";
-export type WorkerProvider = "codex" | "claude" | "copilot";
+export type WorkerRole = "floe" | "planner" | "implementer" | "reviewer";
 export type WorkerStatus = "starting" | "active" | "idle" | "stopped" | "failed";
 
 export interface WorkerConfig {
   role: WorkerRole;
-  provider: WorkerProvider;
   featureId: string;
   epicId?: string;
   releaseId?: string;
@@ -18,16 +16,15 @@ export interface WorkerConfig {
   roleContentPath?: string;
   /** Additional context to include in the system prompt */
   contextAddendum?: string;
-  /** Provider-specific model identifier (e.g. 'claude-sonnet-4-20250514', 'o3-mini'). Passed through to adapter. */
+  /** Model identifier (e.g. 'claude-sonnet-4-20250514', 'o3-mini'). */
   model?: string;
-  /** Thinking/reasoning level: 'low' | 'normal' | 'high'. Adapter maps to provider-specific settings. */
+  /** Thinking/reasoning level: 'low' | 'normal' | 'high'. */
   thinking?: string;
 }
 
 export interface WorkerSession {
   id: string;
   role: WorkerRole;
-  provider: WorkerProvider;
   status: WorkerStatus;
   featureId: string;
   epicId?: string;
@@ -38,7 +35,7 @@ export interface WorkerSession {
   stoppedAt?: string;
   lastMessageAt?: string;
   error?: string;
-  /** Adapter-internal metadata (thread IDs, conversation history, etc.) */
+  /** Runtime metadata (thread IDs, conversation history, etc.) */
   metadata?: Record<string, unknown>;
 }
 

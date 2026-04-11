@@ -28,28 +28,9 @@
  *   check-alignment      Check approach alignment status for a feature
  *
  * Configuration:
- *   configure            Set up provider defaults (flags or discovery mode)
- *   show-config          Show current provider configuration
- *   list-models          List available models for a provider
- *   update-config        Update provider/model/thinking configuration
- *
- * Removed (migration guidance on invocation):
- *   get-worker-result    → use events-subscribe
- *   wait-worker          → use events-subscribe
- *   feature-run-status   → use run-get
- *   wait-feature-run     → use events-subscribe
- *
- * Provider resolution order:
- *   1. --provider flag
- *   2. FLOE_PROVIDER env var
- *   3. .floe/config.json role-specific override
- *   4. .floe/config.json defaultProvider
- *   5. Error (no provider configured)
- *
- * Provider env vars:
- *   ANTHROPIC_API_KEY   — required for Claude adapter
- *   OPENAI_API_KEY      — optional for Codex (falls back to local sign-in)
- *   FLOE_PROVIDER       — override provider for all roles
+ *   configure            Set up model/thinking/srcRoot configuration
+ *   show-config          Show current configuration
+ *   update-config        Update model/thinking configuration
  */
 
 import { parseArgs } from "node:util";
@@ -79,14 +60,12 @@ function findProjectRoot(): string {
 // ─── Configuration ───────────────────────────────────────────────────
 
 interface FloeConfig {
-  defaultProvider: string;
-  enabledProviders?: string[];
   configured?: boolean;
   srcRoot?: string;
   roles?: {
-    planner?: { provider?: string; model?: string; thinking?: string };
-    implementer?: { provider?: string; model?: string; thinking?: string };
-    reviewer?: { provider?: string; model?: string; thinking?: string };
+    planner?: { model?: string; thinking?: string };
+    implementer?: { model?: string; thinking?: string };
+    reviewer?: { model?: string; thinking?: string };
   };
 }
 
@@ -109,53 +88,16 @@ function srcRootContextAddendum(srcRoot: string): string {
   ].join("\n");
 }
 
-function resolveProvider(role: string, args: Record<string, any>, config: FloeConfig | null): {
-  provider: string;
+function resolveModel(role: string, args: Record<string, any>, config: FloeConfig | null): {
   model?: string;
   thinking?: string;
-  error?: string;
 } {
-  // 1. CLI flag
-  if (args.provider) return validateEnabledProvider({ provider: args.provider }, config);
-
-  // 2. Environment variable
-  if (process.env.FLOE_PROVIDER) return validateEnabledProvider({ provider: process.env.FLOE_PROVIDER }, config);
-
-  // 3. Config role-specific
+  if (args.model) return { model: args.model, thinking: args.thinking };
   if (config?.roles) {
     const roleConfig = (config.roles as any)[role];
-    if (roleConfig?.provider) {
-      return validateEnabledProvider({ provider: roleConfig.provider, model: roleConfig.model, thinking: roleConfig.thinking }, config);
-    }
+    if (roleConfig?.model) return { model: roleConfig.model, thinking: roleConfig.thinking };
   }
-
-  // 4. Config default
-  if (config?.defaultProvider) {
-    const roleConfig = config.roles ? (config.roles as any)[role] : undefined;
-    return validateEnabledProvider({
-      provider: config.defaultProvider,
-      model: roleConfig?.model,
-      thinking: roleConfig?.thinking,
-    }, config);
-  }
-
-  // 5. No provider configured
-  return { provider: "" };
-}
-
-function validateEnabledProvider(
-  resolved: { provider: string; model?: string; thinking?: string },
-  config: FloeConfig | null,
-): { provider: string; model?: string; thinking?: string; error?: string } {
-  if (config?.enabledProviders && resolved.provider) {
-    if (!config.enabledProviders.includes(resolved.provider)) {
-      return {
-        provider: "",
-        error: `Provider '${resolved.provider}' is not enabled for this repo. Enabled: [${config.enabledProviders.join(", ")}]. Update .floe/config.json or run: bun run .floe/bin/floe.ts configure`,
-      };
-    }
-  }
-  return resolved;
+  return {};
 }
 
 // ─── Validation helpers ──────────────────────────────────────────────
@@ -344,7 +286,6 @@ function buildDaemonPayload(action: string, args: Record<string, any>): Record<s
   if (args.worker !== undefined && payload.workerId === undefined) payload.workerId = args.worker;
   if (args.call !== undefined && payload.callId === undefined) payload.callId = args.call;
   if (args.role !== undefined && payload.role === undefined) payload.role = args.role;
-  if (args.provider !== undefined && payload.provider === undefined) payload.provider = args.provider;
   if (args.feature !== undefined && payload.featureId === undefined) payload.featureId = args.feature;
   if (args.epic !== undefined && payload.epicId === undefined) payload.epicId = args.epic;
   if (args.release !== undefined && payload.releaseId === undefined) payload.releaseId = args.release;
@@ -494,10 +435,7 @@ async function launchWorker(args: Record<string, any>) {
   // Pre-flight: config must be set up before any worker can launch
   const config = loadConfig(projectRoot);
   if (config?.configured === false) {
-    return { ok: false, error: "Provider not configured. Run: bun run .floe/bin/floe.ts configure" };
-  }
-  if (!config?.enabledProviders) {
-    return { ok: false, error: "enabledProviders not set in .floe/config.json. Run: bun run .floe/bin/floe.ts configure" };
+    return { ok: false, error: "Floe not configured. Run: bun run .floe/bin/floe.ts configure" };
   }
 
   // Planner scope validation
@@ -543,7 +481,6 @@ async function launchWorker(args: Record<string, any>) {
     sessionId: workerId,
     workerId,
     role: session?.role ?? role,
-    provider: session?.provider ?? args.provider ?? null,
     status: session?.status ?? "active",
     ...(initial
       ? {
@@ -621,7 +558,6 @@ async function getWorkerStatus(args: Record<string, any>) {
     ok: true,
     sessionId: args.session,
     role: session?.role ?? worker?.role ?? null,
-    provider: session?.provider ?? worker?.provider ?? null,
     status: worker?.state ?? session?.status ?? "unknown",
     featureId: session?.featureId ?? worker?.metadata?.featureId ?? null,
   };
@@ -641,7 +577,6 @@ async function replaceWorker(args: Record<string, any>) {
   const started = await callDaemonAction("worker.start", {
     ...args,
     role: session.role,
-    provider: session.provider,
     feature: session.featureId,
     epic: session.epicId,
     release: session.releaseId,
@@ -671,7 +606,7 @@ async function listActiveWorkers(args: Record<string, any>) {
     ok: true,
     count: sessions.length,
     workers: sessions.map(s => ({
-      id: s.id, role: s.role, provider: s.provider, status: s.status,
+      id: s.id, role: s.role, status: s.status,
       featureId: s.featureId, createdAt: s.createdAt, lastMessageAt: s.lastMessageAt,
     })),
   };
@@ -702,22 +637,12 @@ async function manageFeaturePair(args: Record<string, any>) {
 
   // Pre-flight: config must be set up
   if (config?.configured === false) {
-    return { ok: false, error: "Provider not configured. Run: bun run .floe/bin/floe.ts configure" };
-  }
-  if (!config?.enabledProviders) {
-    return { ok: false, error: "Provider allowlist not set. Run: bun run .floe/bin/floe.ts configure" };
+    return { ok: false, error: "Floe not configured. Run: bun run .floe/bin/floe.ts configure" };
   }
 
-  // Resolve providers for implementer and reviewer independently
-  const implResolved = args["implementer-provider"]
-    ? validateEnabledProvider({ provider: args["implementer-provider"] }, config)
-    : resolveProvider("implementer", args, config);
-  const revResolved = args["reviewer-provider"]
-    ? validateEnabledProvider({ provider: args["reviewer-provider"] }, config)
-    : resolveProvider("reviewer", args, config);
-
-  if (implResolved.error) return { ok: false, error: implResolved.error };
-  if (revResolved.error) return { ok: false, error: revResolved.error };
+  // Resolve model config for implementer and reviewer
+  const implModel = resolveModel("implementer", args, config);
+  const revModel = resolveModel("reviewer", args, config);
 
   // Derive and set active release/epic/feature context from the feature artefact chain
   try {
@@ -749,8 +674,8 @@ async function manageFeaturePair(args: Record<string, any>) {
     ...args,
     data: JSON.stringify({
       featureId: args.feature,
-      implProvider: implResolved.provider,
-      revProvider: revResolved.provider,
+      implModel: implModel.model ?? null,
+      revModel: revModel.model ?? null,
       epicId: args.epic ?? null,
       releaseId: args.release ?? null,
       srcRoot: config?.srcRoot ?? null,
@@ -842,190 +767,44 @@ async function resolveEscalation(args: Record<string, any>) {
 
 // ─── Configure command ───────────────────────────────────────────────
 
-const PROVIDERS = ["claude", "codex", "copilot"] as const;
-const PROVIDER_HINTS: Record<string, string> = {
-  claude: "requires ANTHROPIC_API_KEY + @anthropic-ai/claude-agent-sdk",
-  codex: "@openai/codex-sdk (API key or local ChatGPT sign-in)",
-  copilot: "@github/copilot-sdk (uses GitHub CLI credentials)",
-};
-
-interface ModelChoice { id: string; label: string }
-
-const THINKING_LEVELS: ModelChoice[] = [
-  { id: "normal", label: "normal (default)" },
-  { id: "low", label: "low" },
-  { id: "high", label: "high (extended thinking)" },
-];
-
-// ── SDK availability detection ───────────────────────────────────────
-
-async function isSdkAvailable(pkg: string): Promise<boolean> {
-  try {
-    await import(pkg);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-interface ProviderDetection {
-  sdkInstalled: boolean;
-  credentialsDetected: boolean;
-  hint: string;
-}
-
-async function detectProviders(): Promise<Record<string, ProviderDetection>> {
-  const [copilotSdk, codexSdk, claudeSdk] = await Promise.all([
-    isSdkAvailable("@github/copilot-sdk"),
-    isSdkAvailable("@openai/codex-sdk"),
-    isSdkAvailable("@anthropic-ai/claude-agent-sdk"),
-  ]);
-
-  return {
-    copilot: {
-      sdkInstalled: copilotSdk,
-      credentialsDetected: copilotSdk, // Copilot SDK uses gh CLI creds automatically
-      hint: PROVIDER_HINTS.copilot,
-    },
-    codex: {
-      sdkInstalled: codexSdk,
-      credentialsDetected: codexSdk || !!process.env.OPENAI_API_KEY,
-      hint: PROVIDER_HINTS.codex,
-    },
-    claude: {
-      sdkInstalled: claudeSdk,
-      credentialsDetected: !!process.env.ANTHROPIC_API_KEY,
-      hint: PROVIDER_HINTS.claude,
-    },
-  };
-}
-
-// ── API model listing (bonus — used by list-models if credentials exist) ─────
-
-async function fetchClaudeModels(): Promise<ModelChoice[]> {
-  const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) return [];
-  try {
-    const res = await fetch("https://api.anthropic.com/v1/models", {
-      headers: { "x-api-key": key, "anthropic-version": "2023-06-01" },
-    });
-    if (!res.ok) return [];
-    const data = (await res.json()) as { data?: { id: string; display_name?: string }[] };
-    return (data.data ?? [])
-      .filter(m => m.id && !m.id.includes("embed"))
-      .map(m => ({ id: m.id, label: m.display_name ?? m.id }))
-      .sort((a, b) => a.id.localeCompare(b.id));
-  } catch {
-    return [];
-  }
-}
-
-async function fetchOpenAIModels(): Promise<ModelChoice[]> {
-  const key = process.env.OPENAI_API_KEY;
-  if (!key) return [];
-  try {
-    const res = await fetch("https://api.openai.com/v1/models", {
-      headers: { Authorization: `Bearer ${key}` },
-    });
-    if (!res.ok) return [];
-    const data = (await res.json()) as { data?: { id: string }[] };
-    return (data.data ?? [])
-      .filter(m => m.id)
-      .map(m => ({ id: m.id, label: m.id }))
-      .sort((a, b) => a.id.localeCompare(b.id));
-  } catch {
-    return [];
-  }
-}
-
-
-
-
-/** Fuzzy-match user text against model list. Returns best match or null. */
-function fuzzyMatchModel(input: string, items: ModelChoice[]): ModelChoice | null {
-  const q = input.toLowerCase().replace(/[^a-z0-9.]/g, "");
-  if (!q) return null;
-  // Exact id match
-  const exact = items.find(m => m.id.toLowerCase() === input.toLowerCase());
-  if (exact) return exact;
-  // Substring match on id or label
-  const matches = items.filter(m =>
-    m.id.toLowerCase().includes(q) || m.label.toLowerCase().replace(/[^a-z0-9.]/g, "").includes(q)
-  );
-  if (matches.length === 1) return matches[0];
-  // Partial token match (e.g. "sonnet 4.6" matches "claude-sonnet-4.6-...")
-  const tokens = input.toLowerCase().split(/[\s\-_]+/).filter(Boolean);
-  if (tokens.length > 0) {
-    const tokenMatches = items.filter(m => {
-      const haystack = `${m.id} ${m.label}`.toLowerCase();
-      return tokens.every(t => haystack.includes(t));
-    });
-    if (tokenMatches.length === 1) return tokenMatches[0];
-    if (tokenMatches.length > 1) return null; // ambiguous
-  }
-  return null;
-}
-
+const THINKING_LEVELS = ["low", "normal", "high"] as const;
 
 async function configureCommand(args: Record<string, any>) {
   const configPath = join(projectRoot, ".floe", "config.json");
 
-  // ── Direct write mode (flags provided) ──────────────────────────
-  const defaultProvider = args["default-provider"] as string | undefined;
-  if (defaultProvider) {
-    if (!PROVIDERS.includes(defaultProvider as any)) {
-      return { ok: false, error: `Invalid provider: ${defaultProvider}. Must be: ${PROVIDERS.join(", ")}` };
-    }
+  const model = args.model as string | undefined;
+  const thinking = args.thinking as string | undefined;
+  const srcRoot = args["src-root"] as string | undefined;
 
-    const rawEnabled = args["enabled-providers"] as string | undefined;
-    const enabledProviders = rawEnabled
-      ? rawEnabled.split(",").map((s: string) => s.trim()).filter(Boolean)
-      : [defaultProvider];
-    for (const ep of enabledProviders) {
-      if (!PROVIDERS.includes(ep as any)) return { ok: false, error: `Invalid enabled provider: ${ep}. Must be: ${PROVIDERS.join(", ")}` };
-    }
-    if (!enabledProviders.includes(defaultProvider)) {
-      return { ok: false, error: `Default provider '${defaultProvider}' must be in enabledProviders [${enabledProviders.join(", ")}]` };
-    }
-
-    const config: FloeConfig = { defaultProvider, enabledProviders, configured: true };
-    if (args["src-root"]) config.srcRoot = args["src-root"] as string;
-    if (args.model || args.thinking) {
-      config.roles = {};
-      for (const role of ["planner", "implementer", "reviewer"] as const) {
-        const roleConf: Record<string, string> = {};
-        if (args.model) roleConf.model = args.model;
-        if (args.thinking) roleConf.thinking = args.thinking;
-        (config.roles as any)[role] = roleConf;
-      }
-    }
-    mkdirSync(join(projectRoot, ".floe"), { recursive: true });
-    writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
-    return { ok: true, message: `Wrote ${configPath}`, config };
+  if (!model && !thinking && !srcRoot) {
+    const existingConfig = loadConfig(projectRoot);
+    return {
+      ok: true,
+      action: "choose",
+      message: "Provide --model <model> and optionally --thinking <level> and --src-root <path> to configure.",
+      thinkingLevels: [...THINKING_LEVELS],
+      currentConfig: existingConfig ?? null,
+    };
   }
 
-  // ── Discovery mode (no flags) ──────────────────────────────────
-  // Returns SDK availability + any API-fetchable models.
-  // The Foreman (which IS running inside a provider) should present
-  // its own visible models to the user and make a recommendation.
+  if (thinking && !THINKING_LEVELS.includes(thinking as any)) {
+    return { ok: false, error: `Invalid thinking: ${thinking}. Must be: ${THINKING_LEVELS.join(", ")}` };
+  }
 
-  const providers = await detectProviders();
-  const existingConfig = loadConfig(projectRoot);
-
-  return {
-    ok: true,
-    action: "choose",
-    message: [
-      "Provider detection complete. Review the results below.",
-      "You (the Foreman) can see your own available models — present those to the user.",
-      "The user can type any model name as free text. The provider SDK validates at session creation.",
-      "Once decided, call: configure --default-provider <provider> [--enabled-providers <csv>] [--model <model>] [--thinking <level>]",
-    ].join(" "),
-    providers,
-    thinkingLevels: THINKING_LEVELS.map(t => t.id),
-    currentConfig: existingConfig ?? null,
-    note: "Model names are free text. The Foreman should present its own visible models and recommend one. Do NOT present hardcoded model lists.",
-  };
+  const config: FloeConfig = { configured: true };
+  if (srcRoot) config.srcRoot = srcRoot;
+  if (model || thinking) {
+    config.roles = {};
+    for (const role of ["planner", "implementer", "reviewer"] as const) {
+      const roleConf: Record<string, string> = {};
+      if (model) roleConf.model = model;
+      if (thinking) roleConf.thinking = thinking;
+      (config.roles as any)[role] = roleConf;
+    }
+  }
+  mkdirSync(join(projectRoot, ".floe"), { recursive: true });
+  writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
+  return { ok: true, message: `Wrote ${configPath}`, config };
 }
 
 // ─── Config management commands ──────────────────────────────────────
@@ -1038,97 +817,39 @@ async function showConfig(_args: Record<string, any>) {
   return {
     ok: true,
     config,
-    enabledProviders: config.enabledProviders ?? "NOT SET (run configure)",
     srcRoot: config.srcRoot ?? null,
-  };
-}
-
-async function listModels(args: Record<string, any>) {
-  const provider = args.provider;
-  if (!provider) return { ok: false, error: "list-models requires --provider <claude|codex|copilot>" };
-  if (!PROVIDERS.includes(provider as any)) {
-    return { ok: false, error: `Invalid provider: ${provider}. Must be: ${PROVIDERS.join(", ")}` };
-  }
-
-  if (provider === "copilot") {
-    return {
-      ok: true,
-      provider,
-      source: "sdk",
-      models: [],
-      note: "Copilot model selection is handled by the SDK. The Foreman can see its own available models — ask it what's available.",
-    };
-  }
-
-  let models: ModelChoice[] = [];
-  let source = "unavailable";
-
-  if (provider === "claude") {
-    models = await fetchClaudeModels();
-    source = models.length > 0 ? "api" : "unavailable";
-  } else if (provider === "codex") {
-    models = await fetchOpenAIModels();
-    source = models.length > 0 ? "api" : "unavailable";
-  }
-
-  return {
-    ok: true,
-    provider,
-    source,
-    models,
-    note: models.length === 0
-      ? "Could not fetch models from API. Type any valid model name — the SDK validates at session creation."
-      : undefined,
   };
 }
 
 async function updateConfig(args: Record<string, any>) {
   const configPath = join(projectRoot, ".floe", "config.json");
-  const config = loadConfig(projectRoot) ?? { defaultProvider: "" } as FloeConfig;
+  const config = loadConfig(projectRoot) ?? {} as FloeConfig;
 
   const role = args.role as string | undefined;
-  const provider = args.provider as string | undefined;
   const model = args.model as string | undefined;
   const thinking = args.thinking as string | undefined;
 
-  if (!provider && !model && !thinking && !args["default-provider"] && !args["src-root"]) {
-    return { ok: false, error: "update-config requires at least one of: --default-provider, --src-root, --provider, --model, --thinking" };
+  if (!model && !thinking && !args["src-root"]) {
+    return { ok: false, error: "update-config requires at least one of: --src-root, --model, --thinking" };
   }
 
-  // Validate provider if given
-  if (provider && !PROVIDERS.includes(provider as any)) {
-    return { ok: false, error: `Invalid provider: ${provider}. Must be: ${PROVIDERS.join(", ")}` };
-  }
-
-  // Validate thinking if given
   const validThinking = ["low", "normal", "high"];
   if (thinking && !validThinking.includes(thinking)) {
     return { ok: false, error: `Invalid thinking: ${thinking}. Must be: ${validThinking.join(", ")}` };
   }
 
-  // Update default provider
-  if (args["default-provider"]) {
-    if (!PROVIDERS.includes(args["default-provider"] as any)) {
-      return { ok: false, error: `Invalid default provider: ${args["default-provider"]}` };
-    }
-    config.defaultProvider = args["default-provider"];
-  }
-
-  // Update srcRoot
   if (args["src-root"] !== undefined) {
     config.srcRoot = (args["src-root"] as string) || undefined;
   }
 
-  // Determine which roles to update
   const targetRoles: string[] = role === "all"
     ? ["planner", "implementer", "reviewer"]
     : role ? [role] : [];
 
-  if (targetRoles.length > 0 && (provider || model || thinking)) {
+  if (targetRoles.length > 0 && (model || thinking)) {
     if (!config.roles) config.roles = {};
     for (const r of targetRoles) {
       const existing = (config.roles as any)[r] ?? {};
-      if (provider) existing.provider = provider;
       if (model) existing.model = model;
       if (thinking) existing.thinking = thinking;
       (config.roles as any)[r] = existing;
@@ -1262,7 +983,6 @@ const { values: opts } = parseArgs({
   args: rest,
   options: {
     role: { type: "string" },
-    provider: { type: "string" },
     feature: { type: "string" },
     epic: { type: "string" },
     release: { type: "string" },
@@ -1272,17 +992,12 @@ const { values: opts } = parseArgs({
     reason: { type: "string" },
     scope: { type: "string" },
     target: { type: "string" },
-    "implementer-provider": { type: "string" },
-    "reviewer-provider": { type: "string" },
     "force-no-alignment": { type: "boolean" },
-    "default-provider": { type: "string" },
-    "non-interactive": { type: "boolean" },
     model: { type: "string" },
     thinking: { type: "string" },
     async: { type: "boolean" },
     "result-path": { type: "string" },
     timeout: { type: "string" },
-    "enabled-providers": { type: "string" },
     escalation: { type: "string" },
     resolution: { type: "string" },
     status: { type: "string" },
@@ -1329,7 +1044,6 @@ async function main() {
     "resolve-escalation": resolveEscalation,
     "configure": configureCommand,
     "show-config": showConfig,
-    "list-models": listModels,
     "update-config": updateConfig,
 
     // Daemon runtime control

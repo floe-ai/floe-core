@@ -9,7 +9,7 @@ description: >
   write delivery state, create or update backlog items, select next work, manage
   reviews, launch workers, or write summaries.
   Keywords: delivery, execution, backlog, release, epic, feature, review, summary,
-  note, state, selection, planning, lifecycle, workers, foreman, planner, implementer, reviewer.
+  note, state, selection, planning, lifecycle, workers, floe, planner, implementer, reviewer.
 license: MIT
 compatibility: Requires Bun (https://bun.sh). Works with Codex, Copilot, and Claude Code.
 ---
@@ -161,7 +161,7 @@ bun run .floe/scripts/validate.ts state             # validate runtime state
 ## Related Skills
 
 - `.floe/skills/sizing-heuristics/SKILL.md` — canonical sizing rules shared across roles
-- `.floe/skills/floe-preflight/SKILL.md` — setup, readiness checks, provider configuration, git/remote setup
+- `.floe/skills/floe-preflight/SKILL.md` — setup, readiness checks, model configuration, git/remote setup
 
 ## External Memory Integration
 
@@ -184,16 +184,16 @@ Use `context-memory` directly for:
 
 The full behavioural definitions for all four roles live in `roles/`:
 
-| Role | File | Provider wrapper |
-|------|------|-----------------|
-| Foreman | `roles/foreman.md` | Provider-visible wrapper installed by `scripts/install.ts` |
-| Planner | `roles/planner.md` | No provider wrapper — injected by floe CLI at launch |
-| Implementer | `roles/implementer.md` | No provider wrapper — injected by floe CLI at launch |
-| Reviewer | `roles/reviewer.md` | No provider wrapper — injected by floe CLI at launch |
+| Role | File | Description |
+|------|------|-------------|
+| Floe | `roles/floe.md` | The user-facing interface agent |
+| Planner | `roles/planner.md` | Injected by runtime at session launch |
+| Implementer | `roles/implementer.md` | Injected by runtime at session launch |
+| Reviewer | `roles/reviewer.md` | Injected by runtime at session launch |
 
-The **Foreman** is the user-facing agent. It reads `roles/foreman.md` for its process rules.
+**Floe** is the user-facing interface agent. It reads `roles/floe.md` for its process rules.
 
-The **Planner, Implementer, and Reviewer** are worker sessions launched and coordinated by the Foreman through the floe CLI. Their canonical role content is injected at session launch time.
+The **Planner, Implementer, and Reviewer** are worker sessions launched and coordinated by floe through the runtime. Their canonical role content is injected at session launch time.
 
 ## Worker Management (floe CLI)
 
@@ -212,7 +212,7 @@ Available commands:
 | `events-subscribe` | Stream live events from a run (workflow.progress, call.pending, run.completed) |
 | `events-replay` | Replay past events for a run |
 | `call-blocking` | (Used by workers) Signal a dependency — establishes persistent socket connection and waits for push-based resolution |
-| `call-resolve` | (Used by workers/foreman) Resolve a blocking call — pushes responsePayload to the waiting worker over persistent channel |
+| `call-resolve` | (Used by workers/floe) Resolve a blocking call — pushes responsePayload to the waiting worker over persistent channel |
 | `call-detect-orphaned` | Scan for timed-out or orphaned blocking calls |
 | `launch-worker` | Start a Planner, Implementer, or Reviewer session (manual use) |
 | `message-worker` | Send ad-hoc instructions to a running worker (not needed during feature execution) |
@@ -222,7 +222,7 @@ Available commands:
 
 Workers are identified by a `sessionId` returned when launched. All session state is persisted to `.floe/state/sessions.json`.
 
-### Foreman workflow with CLI
+### Floe workflow with CLI
 
 ```
 1. Launch: bun run .floe/bin/floe.ts manage-feature-pair --feature <id>
@@ -234,7 +234,7 @@ Workers are identified by a `sessionId` returned when launched. All session stat
 
 3. Check state: bun run .floe/bin/floe.ts run-get --run <runId>
 
-4. Intervene only on escalation or foreman clarification requests.
+4. Intervene only on escalation or floe clarification requests.
 
 No manual worker messaging is needed during autonomous feature execution.
 The daemon drives alignment → implementation → review via blocking calls over persistent socket channels.
@@ -257,7 +257,7 @@ This step is **mandatory** before substantial coding begins on any feature.
    # or
    bun run .floe/scripts/review.ts reject-approach <rev_id> '<rationale>'
    ```
-3. If rejected or escalated, **Foreman** surfaces to the user before proceeding.
+3. If rejected or escalated, **floe** surfaces to the user before proceeding.
 
 The `approach_proposal` field lives on the rolling review object — no separate file is created.
 

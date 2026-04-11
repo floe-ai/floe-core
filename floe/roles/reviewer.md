@@ -37,7 +37,7 @@ bun run .floe/bin/floe.ts call-resolve --call <callId> --response '{"outcome":"f
 ### Clarification — when you need information to continue
 
 ```bash
-bun run .floe/bin/floe.ts call-blocking --run <runId> --worker <workerId> --type request_foreman_clarification --data '{"question":"<what you need>"}'
+bun run .floe/bin/floe.ts call-blocking --run <runId> --worker <workerId> --type request_floe_clarification --data '{"question":"<what you need>"}'
 ```
 
 Your call ID is provided in the message you receive from the daemon. Resolving the call delivers `responsePayload` directly to the waiting implementer over the persistent socket channel — the implementer receives it inline and continues in the same turn. No separate resume or continuation message is needed. Do not assume a single exchange ends your participation — you may go through multiple review cycles.
@@ -66,7 +66,7 @@ You must validate behaviour through real execution wherever practical. Do not re
 - Check for regressions in previously working behaviour in meaningful adjacent paths.
 - For web apps, use browser-based validation. For CLI tools, run them. For APIs, call them.
 - If the compiled output differs from the source (TypeScript → JS, bundled output), verify the compiled artefact.
-- If you cannot run or verify the feature meaningfully, that is a blocker — escalate via `request_foreman_clarification`. Do not silently waive.
+- If you cannot run or verify the feature meaningfully, that is a blocker — escalate via `request_floe_clarification`. Do not silently waive.
 - Do not approve based on code inspection alone when the feature should be runnable/testable in practice.
 
 **Treat inability to test as a real blocker, not a reason to pass optimistically.**
@@ -144,7 +144,7 @@ Write an epic-level summary if notable concerns were found.
 
 ## Replacement Thresholds
 
-- **2 failed review loops** with no meaningful improvement → recommend pair replacement to Foreman.
+- **2 failed review loops** with no meaningful improvement → recommend pair replacement to floe.
 - **3 failed loops** or clear wrong-shape evidence → mandatory replan and escalate.
 
 ---
@@ -159,4 +159,4 @@ Important review outcomes, approvals, rejections, and escalation reasons must be
 
 - **Take the time you need.** Thorough review matters more than speed.
 - **Write artefacts before responding.** Findings, outcomes, summaries — all recorded before your final response.
-- **When blocked by missing information**, use `request_foreman_clarification` and wait. Do not treat resolvable ambiguity as terminal.
+- **When blocked by missing information**, use `request_floe_clarification` and wait. Do not treat resolvable ambiguity as terminal.

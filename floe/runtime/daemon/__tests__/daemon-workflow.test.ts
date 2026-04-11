@@ -51,7 +51,6 @@ function makeWorker(store: DaemonStore, overrides: Partial<WorkerRuntimeRecord> 
     workerId: `w-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
     sessionId: `s-${Date.now().toString(36)}`,
     role: "implementer",
-    provider: "copilot",
     state: "active",
     createdAt: nowIso(),
     updatedAt: nowIso(),

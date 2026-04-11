@@ -1,30 +1,25 @@
 # floe-core
 
-A repo-local execution framework for AI coding agents.
+A daemon-native AI execution framework with structured delivery.
 
-Provides structured delivery (Release → Epic → Feature) with a local daemon runtime, continuation-driven worker coordination, and durable repo artefacts as source of truth.
+Provides structured delivery (Release → Epic → Feature) with a local daemon runtime, persistent socket-based worker coordination, and durable repo artefacts as source of truth.
 
-Works with **Codex**, **Copilot CLI**, and **Claude Code** as the foreman (user-facing) agent. Planner, Implementer, and Reviewer run as daemon-managed worker sessions coordinated through blocking calls and auto-resume.
+**Floe** is the user-facing interface agent. Planner, Implementer, and Reviewer are internal daemon-managed worker sessions.
 
 ---
 
 ## Architecture
 
 ```
-.floe/ (installed into your project)
+floe/ (global engine)
   ├── bin/floe.ts           CLI entrypoint — dispatches to daemon runtime
-  ├── roles/                Canonical role definitions (foreman, planner, implementer, reviewer)
+  ├── roles/                Canonical role definitions (floe, planner, implementer, reviewer)
   ├── skills/               Canonical skill definitions (floe-exec, floe-preflight, sizing-heuristics)
   ├── schemas/              JSON schemas for all durable artefacts
   ├── scripts/              Deterministic Bun scripts for state/artefact operations
-  ├── runtime/              Daemon runtime, provider adapters, session registry
-  │   ├── daemon/           Daemon service, event store, feature workflow engine
-  │   ├── adapters/         Codex, Claude, Copilot, Mock
-  │   └── registry.ts      Session registry → .floe/state/sessions.json
-  └── package.json          Dependencies (zod + optional provider SDKs)
-
-floe-mem (optional, separate)
-  └── Retrieval-augmented memory for context continuity across sessions
+  ├── runtime/              Daemon runtime, session registry
+  │   └── daemon/           Daemon service, event store, feature workflow engine, persistent socket transport
+  └── package.json          Dependencies
 ```
 
 Repository source-of-truth boundaries are defined in [docs/repo-layout-contract.md](docs/repo-layout-contract.md).
@@ -33,25 +28,15 @@ Repository source-of-truth boundaries are defined in [docs/repo-layout-contract.
 
 | Layer | Owns |
 |-------|------|
-| **`floe-exec`** | Workflow rules, hierarchy truth, schemas, Bun scripts, canonical roles, installer |
-| **`floe daemon`** | Feature workflow engine, worker lifecycle, blocking-call ledger, event stream |
-| **`floe CLI`** | CLI entrypoint, provider adapters, daemon dispatch |
+| **`floe-exec`** | Workflow rules, hierarchy truth, schemas, Bun scripts, canonical roles |
+| **`floe daemon`** | Feature workflow engine, worker lifecycle, blocking-call ledger, event stream, persistent socket transport |
+| **`floe CLI`** | CLI entrypoint, daemon dispatch |
 | **`floe-mem`** | Memory retrieval (separate repo, optional) |
 
 ### Role architecture
 
-- **Foreman** — the user-facing agent. Runs in the user's CLI tool (Claude/Codex/Copilot). Reads `.floe/roles/foreman.md`.
-- **Planner / Implementer / Reviewer** — worker sessions launched by the Foreman via the floe CLI. No provider-visible wrapper files — canonical role content is injected at session launch.
-
----
-
-## Auth requirements per provider
-
-| Provider | Auth |
-|----------|------|
-| **Codex** | `OPENAI_API_KEY` env var, or local ChatGPT sign-in (both officially supported) |
-| **Copilot** | Existing GitHub/Copilot CLI credentials (picked up automatically) |
-| **Claude** | `ANTHROPIC_API_KEY` required. Anthropic does not allow third-party products to reuse claude.ai interactive login for SDK use. |
+- **Floe** — the user-facing interface agent. Reads `roles/floe.md`.
+- **Planner / Implementer / Reviewer** — internal worker sessions managed by the daemon. Canonical role content is injected at session launch.
 
 ---
 
@@ -65,17 +50,15 @@ bunx github:floe-ai/floe-core
 
 This single command:
 - Copies the `.floe/` framework directory (scripts, schemas, roles, skills, runtime, CLI)
-- Installs full skill content for each provider (`floe-exec`, `floe-preflight`, `sizing-heuristics`)
-- Generates thin provider foreman wrapper files (behaviour lives in `.floe/roles/foreman.md`)
 - Scaffolds `delivery/` and `docs/` directories
 - Creates `.floe/dod.json` when missing
 - Installs dependencies
 
-Add `--validate` to run consistency checks after install. Use `--no-scaffold` to skip directory creation. Use `--target codex,claude` to install for specific providers only. Use `--force` to overwrite existing installations.
+Add `--validate` to run consistency checks after install. Use `--no-scaffold` to skip directory creation. Use `--force` to overwrite existing installations.
 
-### 2. Open your agent
+### 2. Run floe
 
-Start `claude`, `codex`, or Copilot CLI in your project. The Foreman is loaded automatically from the provider-specific agent wrapper.
+Start floe in your project directory. Floe is the interface agent — it handles intake, planning coordination, execution, and review.
 
 ---
 
@@ -108,7 +91,7 @@ bun run .floe/scripts/sessions.ts active                    # list active worker
 
 ## Feature execution (daemon-native)
 
-The primary execution model is daemon-native. Workers coordinate through blocking calls and auto-resume — no manual messaging or polling required.
+The primary execution model is daemon-native. Workers coordinate through blocking calls over persistent socket connections — no manual messaging or polling required.
 
 ```bash
 # Start a feature run — daemon manages the full lifecycle
@@ -155,9 +138,9 @@ bun run .floe/bin/floe.ts list-active-workers
 
 ## What floe-core is NOT
 
-- Not a cloud service — the daemon runs locally in your project, started on demand
-- Not a replacement for your coding agent — it runs inside it
-- Not a source of truth — `.floe/state/sessions.json` is runtime bookkeeping only; delivery artefacts are the durable truth
+- Not a cloud service — the daemon runs locally, started on demand
+- Not a replacement for your coding agent — it coordinates agents
+- Not a source of truth for delivery — artefacts in `delivery/` are the durable truth; runtime state is bookkeeping
 - Not a workflow database
 
 ---
@@ -179,8 +162,7 @@ your-project/
 │   ├── roles/               canonical role definitions
 │   ├── skills/              canonical skill definitions
 │   ├── runtime/
-│   │   ├── daemon/          daemon service, feature workflow engine, event store
-│   │   └── adapters/        provider adapters (Codex, Claude, Copilot)
+│   │   └── daemon/          daemon service, feature workflow engine, event store, socket transport
 │   ├── dod.json             project Definition of Done
 │   ├── state/
 │   │   ├── current.json     active pointers only (gitignored)
@@ -194,23 +176,8 @@ your-project/
 │   ├── reviews/             rolling review objects
 │   ├── summaries/           run and handoff summaries
 │   └── notes/               pre-planning notes inbox
-├── docs/
-│   ├── prd/                 product requirements
-│   ├── architecture/        architecture documents
-│   └── decisions/           ADRs
-├── .github/
-│   ├── skills/floe-exec/SKILL.md          full copy of canonical skill
-│   ├── skills/floe-preflight/SKILL.md     full copy of canonical skill
-│   ├── skills/sizing-heuristics/SKILL.md  full copy of canonical skill
-│   └── agents/foreman.agent.md            thin wrapper → reads .floe/roles/foreman.md
-├── .claude/
-│   ├── skills/floe-exec/SKILL.md          full copy of canonical skill
-│   ├── skills/floe-preflight/SKILL.md     full copy of canonical skill
-│   ├── skills/sizing-heuristics/SKILL.md  full copy of canonical skill
-│   └── agents/foreman.md                  thin wrapper → reads .floe/roles/foreman.md
-├── .agents/
-│   ├── skills/floe-exec/SKILL.md          full copy of canonical skill
-│   ├── skills/floe-preflight/SKILL.md     full copy of canonical skill
-│   └── skills/sizing-heuristics/SKILL.md  full copy of canonical skill
-└── AGENTS.md                        Codex foreman agent definition (thin wrapper)
+└── docs/
+    ├── prd/                 product requirements
+    ├── architecture/        architecture documents
+    └── decisions/           ADRs
 ```
