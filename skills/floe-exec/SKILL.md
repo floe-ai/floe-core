@@ -134,15 +134,17 @@ bun run $FLOE_ROOT/scripts/validate.ts state             # validate runtime stat
 
 ## Artefact Types
 
-| Type | Prefix | Location | Schema |
-|------|--------|----------|--------|
-| Release | `rel-` | `delivery/releases/` | `schemas/release.json` |
-| Epic | `epic-` | `delivery/epics/` | `schemas/epic.json` |
-| Feature | `feat-` | `delivery/features/` | `schemas/feature.json` |
-| Review | `rev-` | `delivery/reviews/` | `schemas/review.json` |
-| Summary | `sum-` | `delivery/summaries/` | `schemas/summary.json` |
-| Note | `note-` | `delivery/notes/` | `schemas/note.json` |
-| Runtime State | — | `.floe/state/current.json` | `schemas/runtime-state.json` |
+| Type | Prefix | Location |
+|------|--------|----------|
+| Release | `rel-` | `delivery/releases/` |
+| Epic | `epic-` | `delivery/epics/` |
+| Feature | `feat-` | `delivery/features/` |
+| Review | `rev-` | `delivery/reviews/` |
+| Summary | `sum-` | `delivery/summaries/` |
+| Note | `note-` | `delivery/notes/` |
+| Runtime State | — | `.floe/state/current.json` |
+
+All artefacts are YAML files managed via the `artefact.ts` script. Use `bun run $FLOE_ROOT/scripts/artefact.ts create <type> <id>` to create with correct structure.
 
 ## Status Values
 

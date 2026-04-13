@@ -548,6 +548,7 @@ export class DaemonService {
       contextAddendum,
       model: (payload.model as string | undefined) ?? modelResolution.model,
       thinking: (payload.thinking as string | undefined) ?? modelResolution.thinking,
+      cwd: this.projectRoot,
     };
 
     const session = await substrate.startSession(config);

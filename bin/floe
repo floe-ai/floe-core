@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+#
+# floe — Structured AI delivery agent powered by Pi.
+#
+# This is a thin wrapper that launches Pi with the Floe extension loaded.
+# The Floe extension injects the Floe identity, starts the daemon, and
+# registers delivery tools.
+#
+# Usage:
+#   floe                    # Interactive mode
+#   floe "Build auth module" # Start with initial prompt
+#   floe -p "Summarize"     # Print mode
+#   floe -c                 # Continue previous session
+#
+# All Pi flags are supported — this wrapper only ensures the Floe extension
+# is loaded. See `pi --help` for the full flag reference.
+
+set -euo pipefail
+
+# Resolve the package root (bin/ → package root)
+FLOE_PKG_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Launch Pi with the Floe extension
+exec pi -e "${FLOE_PKG_ROOT}/extensions/floe.ts" "$@"

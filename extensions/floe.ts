@@ -1,22 +1,20 @@
 /**
  * Floe Pi extension — the main integration point between Pi and the Floe daemon.
  *
- * When loaded by Pi (via `pi install` or global ~/.pi/agent/extensions/),
- * this extension:
+ * When loaded by Pi (via `pi install`), this extension:
  *
- * 1. Starts or connects to the Floe daemon on session_start
- * 2. Registers Floe-specific tools so the agent can manage features, workers, etc.
- * 3. Registers /floe commands for user interaction
- * 4. Shuts down the daemon cleanly on session_shutdown
- *
- * The user-facing agent IS Pi with this extension loaded. The "floe" identity
- * comes from the role prompt loaded as a Pi skill or AGENTS.md.
+ * 1. Injects the Floe identity into the system prompt via before_agent_start
+ * 2. Starts the Floe daemon on session_start
+ * 3. Registers Floe tools for feature management, worker coordination, etc.
+ * 4. Runs onboarding when the project is not yet configured
+ * 5. Shuts down the daemon cleanly on session_shutdown
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { join, resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { DaemonService } from "../daemon/service.ts";
 import { DaemonServer } from "../daemon/server.ts";
@@ -25,6 +23,14 @@ import { sendDaemonRequest } from "../daemon/client.ts";
 
 let daemonService: DaemonService | null = null;
 let daemonServer: DaemonServer | null = null;
+
+/** Resolve the package root (1 level up from extensions/). */
+function packageRoot(): string {
+  const thisDir =
+    (import.meta as any).dir ??
+    (typeof __dirname !== "undefined" ? __dirname : dirname(fileURLToPath(import.meta.url)));
+  return resolve(thisDir, "..");
+}
 
 function getSocketPath(projectRoot: string): string {
   const stateDir = join(projectRoot, ".floe", "state", "daemon");
@@ -57,13 +63,29 @@ function ensureFloeInit(projectRoot: string): void {
   writeFileSync(join(floeDir, ".gitignore"), "state/\n*.log\n");
 }
 
+function loadFloeConfig(projectRoot: string): Record<string, any> {
+  const configPath = join(projectRoot, ".floe", "config.json");
+  if (!existsSync(configPath)) return { configured: false };
+  try {
+    return JSON.parse(readFileSync(configPath, "utf-8"));
+  } catch {
+    return { configured: false };
+  }
+}
+
+function loadRolePrompt(): string {
+  const rolePath = join(packageRoot(), "prompts", "floe.md");
+  if (existsSync(rolePath)) {
+    return readFileSync(rolePath, "utf-8");
+  }
+  return "You are Floe, an AI agent for structured software delivery. Help the user plan, implement, and review their software projects.";
+}
+
 async function ensureDaemon(projectRoot: string): Promise<string> {
   const socketPath = getSocketPath(projectRoot);
 
-  // Already running in this process?
   if (daemonService) return socketPath;
 
-  // Try connecting to existing daemon
   try {
     const result = await sendDaemonRequest(socketPath, {
       action: "runtime.status",
@@ -86,8 +108,25 @@ async function ensureDaemon(projectRoot: string): Promise<string> {
 }
 
 export default function floeExtension(pi: ExtensionAPI) {
-  let projectRoot = process.cwd();
+  const projectRoot = process.cwd();
   let socketPath: string | null = null;
+
+  // ─── Identity injection ─────────────────────────────────────────────
+  // Use before_agent_start to inject the Floe role prompt into the system
+  // prompt. This makes the agent BE Floe from the first message.
+
+  pi.on("before_agent_start", async (event) => {
+    const floeRole = loadRolePrompt();
+    const config = loadFloeConfig(projectRoot);
+
+    let systemPrompt = event.systemPrompt + "\n\n" + floeRole;
+
+    if (!config.configured) {
+      systemPrompt += `\n\n## Onboarding Required\n\nThis project has not been configured for Floe yet. The file \`.floe/config.json\` has \`configured: false\`.\n\nBefore proceeding with any work, run the floe-preflight skill (/skill:floe-preflight) to set up the project. This will configure the model, source root, and other settings.\n\nDo this automatically — do not wait for the user to ask.`;
+    }
+
+    return { systemPrompt };
+  });
 
   // ─── Lifecycle ───────────────────────────────────────────────────────
 
@@ -117,7 +156,7 @@ export default function floeExtension(pi: ExtensionAPI) {
     name: "floe_manage_feature",
     label: "Manage Feature",
     description: "Start a feature implementation with coordinated implementer and reviewer workers. Launches a daemon-managed workflow that handles the full implementation lifecycle.",
-    promptSnippet: "floe_manage_feature - Start a feature implementation workflow",
+    promptSnippet: "Use floe_manage_feature to start feature implementation workflows with autonomous implementer + reviewer cycles.",
     parameters: Type.Object({
       featureId: Type.String({ description: "Feature identifier" }),
       epicId: Type.Optional(Type.String({ description: "Parent epic identifier" })),
@@ -137,7 +176,7 @@ export default function floeExtension(pi: ExtensionAPI) {
     name: "floe_feature_status",
     label: "Feature Run Status",
     description: "Get the status of a running feature implementation, including worker states and pending calls.",
-    promptSnippet: "floe_feature_status - Check feature run status",
+    promptSnippet: "Use floe_feature_status to check the status of feature runs.",
     parameters: Type.Object({
       runId: Type.Optional(Type.String({ description: "Run ID to check" })),
       featureId: Type.Optional(Type.String({ description: "Feature ID to look up" })),
@@ -155,7 +194,7 @@ export default function floeExtension(pi: ExtensionAPI) {
     name: "floe_call_resolve",
     label: "Resolve Blocking Call",
     description: "Resolve a pending blocking call from a worker (e.g., approve or reject a review).",
-    promptSnippet: "floe_call_resolve - Resolve a worker's blocking call",
+    promptSnippet: "Use floe_call_resolve to resolve blocking calls (review approvals, approach decisions).",
     parameters: Type.Object({
       callId: Type.String({ description: "The blocking call ID to resolve" }),
       response: Type.String({ description: "JSON response payload" }),
@@ -178,7 +217,7 @@ export default function floeExtension(pi: ExtensionAPI) {
     name: "floe_worker_status",
     label: "Worker Status",
     description: "Get the status of a specific worker session or list all active workers.",
-    promptSnippet: "floe_worker_status - Check worker status",
+    promptSnippet: "Use floe_worker_status to check worker session status.",
     parameters: Type.Object({
       workerId: Type.Optional(Type.String({ description: "Specific worker ID" })),
     }),
@@ -190,7 +229,6 @@ export default function floeExtension(pi: ExtensionAPI) {
           details: {},
         };
       }
-      // List all workers
       const result = await daemon("runtime.status", {});
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -203,7 +241,7 @@ export default function floeExtension(pi: ExtensionAPI) {
     name: "floe_events",
     label: "Replay Events",
     description: "Replay events for a specific run to see what happened.",
-    promptSnippet: "floe_events - View run event history",
+    promptSnippet: "Use floe_events to view event history for a feature run.",
     parameters: Type.Object({
       runId: Type.String({ description: "Run ID to replay events for" }),
       cursor: Type.Optional(Type.Number({ description: "Start from this sequence number" })),

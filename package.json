@@ -13,12 +13,17 @@
     "skills": ["./skills"],
     "prompts": ["./prompts"]
   },
+  "bin": {
+    "floe": "./bin/floe"
+  },
   "type": "module",
   "files": [
+    "bin/",
     "daemon/",
     "extensions/",
     "skills/",
     "prompts/",
+    "scripts/",
     "docs/"
   ],
   "dependencies": {

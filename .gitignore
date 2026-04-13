@@ -9,4 +9,8 @@ dist/
 
 # Test / temp
 *.tmp
+
+# Runtime state (project-local, gitignored)
 .floe/state/
+.ai/state/
+.ai/memory/

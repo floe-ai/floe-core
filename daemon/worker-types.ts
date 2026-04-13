@@ -20,6 +20,8 @@ export interface WorkerConfig {
   model?: string;
   /** Thinking/reasoning level: 'low' | 'normal' | 'high'. */
   thinking?: string;
+  /** Working directory for the session. Defaults to process.cwd(). */
+  cwd?: string;
 }
 
 export interface WorkerSession {
