@@ -2,10 +2,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { SessionRegistry } from "../registry.ts";
-import { loadDod, formatDodForPrompt } from "../dod.ts";
-import type { WorkerConfig, WorkerRole, WorkerSession } from "../types.ts";
-import type { SendOptions, MessageResult, WorkerStatus } from "../types.ts";
+import { SessionRegistry } from "./registry.ts";
+import { loadDod, formatDodForPrompt } from "./dod.ts";
+import type { WorkerConfig, WorkerRole, WorkerSession } from "./worker-types.ts";
+import type { SendOptions, MessageResult, WorkerStatus } from "./worker-types.ts";
 import { DaemonStore } from "./store.ts";
 import { FeatureWorkflowEngine } from "./feature-workflow.ts";
 import type { WaiterRegistry } from "./worker-channel.ts";
@@ -81,18 +81,14 @@ function makeId(prefix: string): string {
 }
 
 /**
- * Resolve the Floe install root — where canonical roles, skills, schemas,
- * and scripts live. This is relative to the module's own location, NOT
- * the project being worked on.
- *
- * Layout: floe/runtime/daemon/service.ts → floe/ is 3 levels up.
+ * Resolve the Floe install root — the Pi package root.
+ * Layout: daemon/service.ts → package root is 1 level up.
  */
 function floeRoot(): string {
-  // import.meta.dir is a Bun extension; fall back to __dirname or fileURLToPath.
   const thisDir =
     (import.meta as any).dir ??
     (typeof __dirname !== "undefined" ? __dirname : dirname(fileURLToPath(import.meta.url)));
-  return resolve(thisDir, "..", "..", "..");
+  return resolve(thisDir, "..");
 }
 
 export class DaemonService {
@@ -284,12 +280,12 @@ export class DaemonService {
   }
 
   private readRoleContent(role: WorkerRole): { content?: string; path?: string } {
-    const globalRolesDir = join(floeRoot(), "floe", "roles");
+    const globalPromptsDir = join(floeRoot(), "prompts");
     const candidates = [
       // Project-local override takes priority (completely replaces global)
-      join(this.projectRoot, ".floe", "roles", `${role}.md`),
-      // Global canonical role from the Floe install
-      join(globalRolesDir, `${role}.md`),
+      join(this.projectRoot, ".floe", "prompts", `${role}.md`),
+      // Global canonical prompt from the Floe Pi package
+      join(globalPromptsDir, `${role}.md`),
     ];
 
     for (const path of candidates) {

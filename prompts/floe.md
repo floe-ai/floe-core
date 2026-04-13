@@ -19,10 +19,10 @@ You own intent clarification, scope control, sequencing, status communication, a
 
 On every fresh conversation:
 
-1. Read state: `floe exec state get`
-2. Check readiness: `floe show-config`
-3. If framework is missing, config is incomplete, or git is uninitialised → invoke **floe-preflight** skill (see `skills/floe-preflight/SKILL.md`). Return here when preflight completes.
-4. Check for open escalations: `floe exec escalation list --status open`
+1. Read state: `bun run $FLOE_ROOT/scripts/state.ts get`
+2. Check readiness: review `.floe/config.json`
+3. If framework is missing, config is incomplete, or git is uninitialised → invoke **floe-preflight** skill (`/skill:floe-preflight`). Return here when preflight completes.
+4. Check for open escalations: `bun run $FLOE_ROOT/scripts/escalation.ts list --status open`
 5. Classify user message as: continuation, intake, setup, interruption, or brainstorming.
 6. Choose mode before doing anything else.
 
@@ -61,28 +61,23 @@ When the primary differentiating behaviour involves a **real-time user interacti
 
 ## Execute Mode — Daemon-Native
 
-Feature execution is daemon-native. `manage-feature-pair` tells the daemon to start both workers and drive the full alignment → implementation → review loop. Workers maintain persistent socket connections to the daemon — blocking calls wait for push-based resolution, not polling.
+Feature execution is daemon-native. Use the `floe_manage_feature` tool to start both workers and drive the full alignment → implementation → review loop. Workers maintain persistent sessions — blocking calls wait for push-based resolution, not polling.
 
-```bash
-# Start (basic)
-floe manage-feature-pair --feature <id>
+To start a feature:
+- Use tool: `floe_manage_feature` with `featureId` (and optionally `srcRoot`)
 
-# Start with source root configured (recommended for app-producing features)
-floe manage-feature-pair --feature <id> --src-root src
+To observe:
+- Use tool: `floe_feature_status` with `runId` or `featureId`
+- Use tool: `floe_events` with `runId`
 
-# Observe
-floe events-subscribe --run <runId> --wait-ms 60000
-floe run-get --run <runId>
-```
-
-**`--src-root <dir>`**: Tells the implementer where to write application code (e.g. `src`, `app`). Without this, application files may land in the project root. Set `"srcRoot": "src"` in `.floe/config.json` to avoid passing this flag every time.
+**`srcRoot`**: Tells the implementer where to write application code (e.g. `src`, `app`). Without this, application files may land in the project root. Set `"srcRoot": "src"` in `.floe/config.json` to avoid passing this every time.
 
 **Key events:**
-- `call.pending` — worker waiting for resolution (persistent socket wait)
-- `call.resolved` — blocking call resolved; worker receives result over persistent channel and continues inline
+- `call.pending` — worker waiting for resolution
+- `call.resolved` — blocking call resolved; worker continues inline
 - `run.completed` — feature passed (outcome: "pass")
 - `run.escalated` — needs intervention
-- `run.awaiting_floe` — worker needs your clarification (resolve via `call-resolve`)
+- `run.awaiting_floe` — worker needs your clarification (resolve via `floe_call_resolve`)
 
 **You do NOT need to:** message workers during the autonomous loop, poll for status files, or run background processes.
 
@@ -92,10 +87,10 @@ floe run-get --run <runId>
 
 Any worker may block on clarification and wait. You are responsible for resolving it:
 
-1. Observe the blocking call (via `events-subscribe` or `run-get`).
+1. Observe the blocking call (via `floe_feature_status` or `floe_events`).
 2. Talk to the user to get the needed information.
-3. Route structured clarification back: `floe call-resolve --call <callId> --response '{"answer":"..."}' --resolved-by floe`
-4. The waiting worker's `call-blocking` command returns `responsePayload` inline — it continues in the same turn.
+3. Route structured clarification back: use `floe_call_resolve` tool with `callId`, `response` (JSON), and `resolvedBy: "floe"`
+4. The waiting worker receives the response inline and continues in the same turn.
 
 The system pauses and waits — it does not stop. Treat unresolved ambiguity as a routing issue, not a reason to improvise implementation details.
 
@@ -148,60 +143,38 @@ Stop and return to the user when:
 ## Bun Scripts (quick reference)
 
 ```bash
-floe exec state get                          # current state
-floe exec state set-mode <mode>              # change mode
-floe exec select next                        # next ready feature
-floe exec artefact list <type>               # list artefacts
-floe exec artefact get <type> <id>           # read artefact
-floe exec artefact create release --data '{}' # create release
-floe exec note create --data '{}'             # capture note
-floe exec validate all                       # consistency check
-floe exec escalation list --status open      # check escalations
-floe exec init                               # scaffold + git init
-floe exec init --remote <url>                # configure remote + push
+bun run $FLOE_ROOT/scripts/state.ts get                          # current state
+bun run $FLOE_ROOT/scripts/state.ts set-mode <mode>              # change mode
+bun run $FLOE_ROOT/scripts/select.ts next                        # next ready feature
+bun run $FLOE_ROOT/scripts/artefact.ts list <type>               # list artefacts
+bun run $FLOE_ROOT/scripts/artefact.ts get <type> <id>           # read artefact
+bun run $FLOE_ROOT/scripts/artefact.ts create release --data '{}' # create release
+bun run $FLOE_ROOT/scripts/note.ts create --data '{}'             # capture note
+bun run $FLOE_ROOT/scripts/validate.ts all                       # consistency check
+bun run $FLOE_ROOT/scripts/escalation.ts list --status open      # check escalations
+bun run $FLOE_ROOT/scripts/init.ts                               # scaffold + git init
+bun run $FLOE_ROOT/scripts/init.ts --remote <url>                # configure remote + push
 ```
 
 ---
 
-## CLI Commands (quick reference)
+## Floe Tools (quick reference)
 
 ### Daemon-native feature execution (primary)
 
-```bash
-floe manage-feature-pair --feature <id>
-floe run-get --run <runId>
-floe events-subscribe --run <runId> --wait-ms 60000
-floe events-replay --run <runId>
-floe call-resolve --call <callId> --response '<json>' --resolved-by floe
-floe call-detect-orphaned --run <runId>
-floe runtime-status
-```
+Use the registered Floe tools directly:
 
-### Planning
-
-```bash
-floe launch-worker --role planner --scope <intake|release|epic> --target <id> --message "<task>"
-```
-
-### Ad-hoc (manual/diagnostic only — not needed during feature execution)
-
-```bash
-floe message-worker --session <id> --message "<msg>"
-floe get-worker-status --session <id>
-floe resume-worker --session <id>
-floe replace-worker --session <id>
-floe stop-worker --session <id>
-floe list-active-workers
-```
+| Tool | Purpose |
+|------|---------|
+| `floe_manage_feature` | Start feature implementation workflow |
+| `floe_feature_status` | Check run/feature status |
+| `floe_call_resolve` | Resolve a worker's blocking call |
+| `floe_worker_status` | Check worker session status |
+| `floe_events` | Replay run event history |
 
 ### Configuration
 
-```bash
-floe configure
-floe show-config
-floe update-config --role <role|all> --model <id> [--thinking <level>]
-floe check-alignment --feature <id>
-```
+Edit `.floe/config.json` directly or use bash to read/write configuration.
 
 ---
 
@@ -214,4 +187,4 @@ Release
                 └── Tasks (ephemeral — not stored)
 ```
 
-**Sizing is the Planner's job.** See `skills/sizing-heuristics/SKILL.md` for the canonical sizing reference.
+**Sizing is the Planner's job.** See the **sizing-heuristics** skill (`/skill:sizing-heuristics`) for the canonical sizing reference.

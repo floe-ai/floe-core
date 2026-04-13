@@ -112,7 +112,7 @@ A **feature** is one coherent outcome that one implementer/reviewer pair can own
 
 An **epic** is one independently deployable, independently valuable vertical slice.
 
-See `skills/sizing-heuristics/SKILL.md` for the canonical reference.
+See the **sizing-heuristics** skill (`/skill:sizing-heuristics`) for the canonical reference.
 
 ---
 

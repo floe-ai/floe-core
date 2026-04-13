@@ -12,14 +12,14 @@ import { resolve, join, dirname, basename } from "node:path";
 const MARKERS = [".git", ".floe", ".github", ".agents", ".claude", "package.json"];
 
 export function findProjectRoot(from?: string): string {
-  let dir = from ?? dirname(dirname(import.meta.dir)); // up from scripts/ -> floe/ -> project root
+  let dir = from ?? process.cwd();
   for (let i = 0; i < 20; i++) {
     if (MARKERS.some((m) => existsSync(join(dir, m)))) return dir;
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
-  return dirname(dirname(import.meta.dir));
+  return process.cwd();
 }
 
 // ── Path helpers ──────────────────────────────────────────────────────

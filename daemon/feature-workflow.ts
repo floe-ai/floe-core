@@ -255,11 +255,11 @@ export class FeatureWorkflowEngine {
       `Your run ID is "${state.runId}" and your worker ID is "${state.implWorkerId}".`,
       "",
       "Read the feature artefact and the project Definition of Done:",
-      `  floe exec artefact get feature ${state.featureId}`,
-      `  floe exec review get-for ${state.featureId}`,
+      `  Use bash: bun run $FLOE_ROOT/scripts/artefact.ts get feature ${state.featureId}`,
+      `  Use bash: bun run $FLOE_ROOT/scripts/review.ts get-for ${state.featureId}`,
       "",
       "Propose your execution approach. When ready, signal via blocking call:",
-      `  floe call-blocking --run ${state.runId} --worker ${state.implWorkerId} --type ${CALL_TYPES.APPROACH_REVIEW} --data '{"featureId":"${state.featureId}"}'`,
+      `  Use floe_call_blocking tool --run ${state.runId} --worker ${state.implWorkerId} --type ${CALL_TYPES.APPROACH_REVIEW} --data '{"featureId":"${state.featureId}"}'`,
       "",
       "This will pause your session until the reviewer responds.",
     ].join("\n");
@@ -338,8 +338,8 @@ export class FeatureWorkflowEngine {
    * The implementer is now in "waiting" state (set by call.blocking in service.ts).
    */
   private async dispatchApproachReview(state: FeatureWorkflowState, callId?: string): Promise<void> {
-    const implNextCmd = `floe call-blocking --run ${state.runId} --worker ${state.implWorkerId} --type request_code_review --feature ${state.featureId}`;
-    const implResubmitCmd = `floe call-blocking --run ${state.runId} --worker ${state.implWorkerId} --type request_approach_review --feature ${state.featureId}`;
+    const implNextCmd = `Use floe_call_blocking tool --run ${state.runId} --worker ${state.implWorkerId} --type request_code_review --feature ${state.featureId}`;
+    const implResubmitCmd = `Use floe_call_blocking tool --run ${state.runId} --worker ${state.implWorkerId} --type request_approach_review --feature ${state.featureId}`;
 
     const approvedContinuation = [
       "Approach approved. Proceed with full implementation now.",
@@ -363,12 +363,12 @@ export class FeatureWorkflowEngine {
       `Your run ID is "${state.runId}" and your worker ID is "${state.revWorkerId}".`,
       "",
       "Read the feature and review artefacts:",
-      `  floe exec artefact get feature ${state.featureId}`,
-      `  floe exec review get-for ${state.featureId}`,
+      `  Use bash: bun run $FLOE_ROOT/scripts/artefact.ts get feature ${state.featureId}`,
+      `  Use bash: bun run $FLOE_ROOT/scripts/review.ts get-for ${state.featureId}`,
       "",
       "Evaluate the approach. When done, resolve the blocking call:",
-      `  Approve: floe call-resolve --call ${callId ?? "<call_id>"} --response '${approvedResponse}' --resolved-by reviewer`,
-      `  Reject:  floe call-resolve --call ${callId ?? "<call_id>"} --response '${rejectedResponse}' --resolved-by reviewer`,
+      `  Approve: Use floe_call_resolve tool --call ${callId ?? "<call_id>"} --response '${approvedResponse}' --resolved-by reviewer`,
+      `  Reject:  Use floe_call_resolve tool --call ${callId ?? "<call_id>"} --response '${rejectedResponse}' --resolved-by reviewer`,
       "",
       "The implementer is waiting on its persistent socket channel — your resolution will be pushed to it directly.",
     ].join("\n");
@@ -386,7 +386,7 @@ export class FeatureWorkflowEngine {
   private async dispatchCodeReview(state: FeatureWorkflowState, callId?: string): Promise<void> {
     state.phase = "review";
 
-    const implRevisionCmd = `floe call-blocking --run ${state.runId} --worker ${state.implWorkerId} --type revision_ready --feature ${state.featureId}`;
+    const implRevisionCmd = `Use floe_call_blocking tool --run ${state.runId} --worker ${state.implWorkerId} --type revision_ready --feature ${state.featureId}`;
 
     const failContinuation = [
       "Review failed. Address all findings, then signal revision complete:",
@@ -402,12 +402,12 @@ export class FeatureWorkflowEngine {
       `Your run ID is "${state.runId}" and your worker ID is "${state.revWorkerId}".`,
       "",
       "Review the implementation against the feature requirements and DoD:",
-      `  floe exec artefact get feature ${state.featureId}`,
-      `  floe exec review get-for ${state.featureId}`,
+      `  Use bash: bun run $FLOE_ROOT/scripts/artefact.ts get feature ${state.featureId}`,
+      `  Use bash: bun run $FLOE_ROOT/scripts/review.ts get-for ${state.featureId}`,
       "",
       "When done, resolve the blocking call:",
-      `  Pass: floe call-resolve --call ${callId ?? "<call_id>"} --response '${passResponse}' --resolved-by reviewer`,
-      `  Fail: floe call-resolve --call ${callId ?? "<call_id>"} --response '${failResponse}' --resolved-by reviewer`,
+      `  Pass: Use floe_call_resolve tool --call ${callId ?? "<call_id>"} --response '${passResponse}' --resolved-by reviewer`,
+      `  Fail: Use floe_call_resolve tool --call ${callId ?? "<call_id>"} --response '${failResponse}' --resolved-by reviewer`,
       "",
       "The implementer is waiting on its persistent socket channel — your resolution will be pushed to it directly.",
     ].join("\n");
@@ -433,7 +433,7 @@ export class FeatureWorkflowEngine {
       return;
     }
 
-    const implRevisionCmd = `floe call-blocking --run ${state.runId} --worker ${state.implWorkerId} --type revision_ready --feature ${state.featureId}`;
+    const implRevisionCmd = `Use floe_call_blocking tool --run ${state.runId} --worker ${state.implWorkerId} --type revision_ready --feature ${state.featureId}`;
 
     const failContinuation = [
       `Review failed again (round ${state.round}). Address all findings, then re-signal:`,
@@ -448,12 +448,12 @@ export class FeatureWorkflowEngine {
       `The implementer has revised feature "${state.featureId}" (round ${state.round}).`,
       "",
       "Re-review the implementation:",
-      `  floe exec artefact get feature ${state.featureId}`,
-      `  floe exec review get-for ${state.featureId}`,
+      `  Use bash: bun run $FLOE_ROOT/scripts/artefact.ts get feature ${state.featureId}`,
+      `  Use bash: bun run $FLOE_ROOT/scripts/review.ts get-for ${state.featureId}`,
       "",
       "Resolve the blocking call:",
-      `  Pass: floe call-resolve --call ${callId ?? "<call_id>"} --response '${passResponse}' --resolved-by reviewer`,
-      `  Fail: floe call-resolve --call ${callId ?? "<call_id>"} --response '${failResponse}' --resolved-by reviewer`,
+      `  Pass: Use floe_call_resolve tool --call ${callId ?? "<call_id>"} --response '${passResponse}' --resolved-by reviewer`,
+      `  Fail: Use floe_call_resolve tool --call ${callId ?? "<call_id>"} --response '${failResponse}' --resolved-by reviewer`,
     ].join("\n");
 
     const result = await this.sendMessage(state.revWorkerId, msg);

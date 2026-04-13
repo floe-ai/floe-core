@@ -4,7 +4,7 @@
  * Tests the DaemonStore (including event subscription), blocking call lifecycle,
  * FeatureWorkflowEngine event reactor, and CLI migration stubs.
  *
- * Run: bun test floe/runtime/daemon/__tests__/daemon-workflow.test.ts
+ * Run: bun test daemon/__tests__/daemon-workflow.test.ts
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
@@ -342,7 +342,7 @@ describe("FeatureWorkflowEngine", () => {
 
     const implMessages = sentMessages.filter(m => m.workerId === "impl-w");
     expect(implMessages.length).toBe(1);
-    expect(implMessages[0]!.message).toContain("call-blocking");
+    expect(implMessages[0]!.message).toContain("floe_call_blocking");
     expect(implMessages[0]!.message).toContain(CALL_TYPES.APPROACH_REVIEW);
 
     const events = store.listEvents({ runId: run.runId });
@@ -376,7 +376,7 @@ describe("FeatureWorkflowEngine", () => {
 
     const revMessages = sentMessages.filter(m => m.workerId === "rev-w");
     expect(revMessages.length).toBe(1);
-    expect(revMessages[0]!.message).toContain("call-resolve");
+    expect(revMessages[0]!.message).toContain("floe_call_resolve");
     expect(revMessages[0]!.message).toContain("call-001");
     expect(revMessages[0]!.message).toContain("verdict");
 
@@ -790,29 +790,5 @@ describe("FeatureWorkflowEngine", () => {
 
     expect(engine.getState(run.runId)).toBeUndefined();
     expect(store.getRun(run.runId)!.state).toBe("escalated");
-  });
-});
-
-// ── CLI Legacy Command Migration Tests ──────────────────────────────
-
-describe("CLI legacy command migration", () => {
-  test("feature-run-status returns migration error", () => {
-    const proc = Bun.spawnSync(
-      ["bun", "run", join(import.meta.dir, "../../../bin/floe.ts"), "feature-run-status", "--feature", "test"],
-      { stdout: "pipe", stderr: "pipe" },
-    );
-    const output = JSON.parse(proc.stdout.toString());
-    expect(output.ok).toBe(false);
-    expect(output.error).toContain("removed");
-  });
-
-  test("wait-feature-run returns migration error", () => {
-    const proc = Bun.spawnSync(
-      ["bun", "run", join(import.meta.dir, "../../../bin/floe.ts"), "wait-feature-run", "--feature", "test"],
-      { stdout: "pipe", stderr: "pipe" },
-    );
-    const output = JSON.parse(proc.stdout.toString());
-    expect(output.ok).toBe(false);
-    expect(output.error).toContain("removed");
   });
 });

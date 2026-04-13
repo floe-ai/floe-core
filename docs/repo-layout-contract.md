@@ -1,72 +1,75 @@
 # Floe Repository Layout Contract
 
-This document defines source-of-truth boundaries for `floe-core`.
+This document defines the file/directory layout for the floe-core Pi package
+and for projects using Floe.
 
-## Global Engine (`floe/`)
+## Pi Package Layout (floe-core)
 
-Everything under `floe/` is the product engine — globally installed.
+```
+floe-core/
+├── package.json              Pi package manifest (pi.extensions, pi.skills, pi.prompts)
+├── extensions/
+│   └── floe.ts               Main Floe extension for Pi
+├── daemon/
+│   ├── service.ts            DaemonService — core orchestration
+│   ├── feature-workflow.ts   Feature workflow state machine
+│   ├── pi-substrate.ts       Pi SDK session substrate
+│   ├── store.ts              Event store and state persistence
+│   ├── server.ts             Unix socket server
+│   ├── worker-channel.ts     Persistent socket transport
+│   ├── worker-client.ts      Worker-side client
+│   ├── client.ts             Daemon request client
+│   ├── types.ts              Protocol types
+│   ├── registry.ts           Session registry
+│   ├── dod.ts                Definition of Done loader
+│   ├── worker-types.ts       Worker config/session types
+│   └── __tests__/            Test suite
+├── skills/
+│   ├── floe-exec/SKILL.md
+│   ├── floe-preflight/SKILL.md
+│   └── sizing-heuristics/SKILL.md
+├── prompts/
+│   ├── floe.md               Interface agent role
+│   ├── implementer.md        Implementation worker role
+│   ├── reviewer.md           Review worker role
+│   └── planner.md            Planning worker role
+├── scripts/                  Bun scripts for state/artefact operations
+└── docs/
+```
 
-| Path | Owns |
-|------|------|
-| `floe/bin/` | CLI entrypoint (`floe.ts`), daemon process (`floe-daemon.ts`) |
-| `floe/roles/` | Canonical role definitions (floe, planner, implementer, reviewer) |
-| `floe/skills/` | Canonical skill definitions (floe-exec, floe-preflight, sizing-heuristics) |
-| `floe/schemas/` | JSON schemas for all durable artefact types |
-| `floe/scripts/` | Deterministic Bun scripts for state/artefact operations |
-| `floe/runtime/daemon/` | Daemon service, event store, feature workflow engine, persistent socket transport |
-| `floe/runtime/substrate/` | Pi session substrate — sole session host for all worker sessions |
-| `floe/runtime/registry.ts` | Session registry (in-memory + persistent) |
+## Project-Local State (.floe/)
 
-These are loaded by the Floe runtime from the global install location. They are **not** copied into each project.
+Created automatically when Floe first runs in a project.
 
-## Project-Local State (`.floe/`)
+```
+.floe/
+├── config.json               Project configuration
+├── dod.json                  Definition of Done
+├── state/                    Runtime state (gitignored)
+│   ├── current.json          Active pointers (mode, active release/epic/feature)
+│   ├── sessions.json         Worker session registry
+│   └── daemon/               Daemon state, event journals
+├── prompts/                  (optional) Project-local prompt overrides
+├── .gitignore                Keeps state/ out of version control
+```
 
-Running `floe init` (or first `floe` run) creates minimal project-local state:
+## Delivery Artefacts
 
-| Path | Purpose | VCS |
-|------|---------|-----|
-| `.floe/config.json` | Project configuration (model settings, srcRoot, overrides) | Committed |
-| `.floe/dod.json` | Project-level definition of done | Committed |
-| `.floe/state/` | Runtime state (sessions, daemon, events) | Gitignored |
-| `.floe/roles/` | (optional) Project-local role overrides | Committed |
-| `.floe/skills/` | (optional) Project-local skill overrides | Committed |
+```
+delivery/
+├── releases/                 Release definitions (YAML)
+├── epics/                    Epic definitions
+├── features/                 Feature definitions
+├── reviews/                  Rolling review records
+├── summaries/                Execution summaries
+├── notes/                    Pre-planning inbox
+└── escalations/              Escalation records
+```
 
-**No framework code is copied.** The `.floe/` directory holds configuration and state only.
+## Key Principles
 
-## Role & Skill Loading
-
-Canonical roles and skills are part of the global Floe runtime. The daemon loads them automatically from the global install location.
-
-- **Project-local override** (`.floe/roles/planner.md`) completely replaces the global version for that project.
-- **No resolution chain** — global skills are loaded as part of the runtime's own config; project-local overrides are a full replacement, not a fallback.
-- **No per-project script copies** — scripts and executables are part of the global engine.
-
-## Pi Session Substrate
-
-The Pi substrate (`floe/runtime/substrate/pi.ts`) is the sole session host:
-
-- All worker sessions (floe, planner, implementer, reviewer) are Pi-hosted
-- Pi manages in-memory sessions with conversation history
-- Pi routes model API calls based on model identifier (Anthropic, OpenAI)
-- There is no adapter pattern — Pi is the substrate, not one of many backends
-
-## Session ID Contract
-
-Worker session IDs include the role as a prefix:
-
-- Format: `<role>-<timestamp>-<random>`
-- Example: `implementer-m5x8k2-a7b3c9`
-
-## Non-Canonical Files
-
-Anything outside `floe/` is repository build/support context:
-
-- `scripts/` (repo root) — installer and project initialisation
-- `docs/` — design docs and operating notes
-
-## Context Memory Contract
-
-`context-memory` / `floe-mem` is external.
-
-- `floe-core` must not install it.
-- `floe-core` may detect and integrate with it when already present.
+1. **Pi owns the harness** — sessions, models, tools, context, compaction
+2. **Floe extends Pi** — extension registers tools, daemon manages workflows
+3. **Global engine, local state** — no framework code copied into projects
+4. **Skills loaded by Pi** — via standard Pi skill discovery, not file paths
+5. **Workers are Pi SDK sessions** — created via `createAgentSession()`

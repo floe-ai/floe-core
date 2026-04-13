@@ -1,20 +1,36 @@
 {
   "name": "floe-core",
-  "version": "0.3.0",
-  "description": "Globally-installed AI agent runtime. Pi-native daemon with structured delivery: releases, epics, features, reviews, and autonomous worker coordination.",
-  "bin": {
-    "floe": "floe/bin/floe.ts",
-    "floe-daemon": "floe/bin/floe-daemon.ts",
-    "floe-init": "scripts/install.ts"
-  },
-  "files": [
-    "scripts/",
-    "floe/"
-  ],
-  "keywords": ["ai", "agent", "runtime", "daemon", "delivery", "framework", "floe"],
+  "version": "0.4.0",
+  "description": "Pi-native AI agent runtime for structured software delivery. Daemon-orchestrated multi-worker coordination with feature workflows, blocking calls, and autonomous review cycles.",
+  "keywords": ["pi-package", "ai", "agent", "runtime", "daemon", "delivery", "floe"],
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/floe-ai/floe-core.git"
+  },
+  "pi": {
+    "extensions": ["./extensions"],
+    "skills": ["./skills"],
+    "prompts": ["./prompts"]
+  },
+  "type": "module",
+  "files": [
+    "daemon/",
+    "extensions/",
+    "skills/",
+    "prompts/",
+    "docs/"
+  ],
+  "dependencies": {
+    "@mariozechner/pi-coding-agent": "^0.66.1",
+    "@sinclair/typebox": "^0.34.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "bun-types": "^1.3.11"
+  },
+  "scripts": {
+    "test": "bun test daemon/"
   }
 }

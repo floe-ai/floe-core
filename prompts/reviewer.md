@@ -23,21 +23,21 @@ The implementer signals readiness via `call-blocking`. The daemon dispatches you
 ### Approach review — approve or reject
 
 ```bash
-floe call-resolve --call <callId> --response '{"verdict":"approved","continuation":"Approach approved. Proceed."}' --resolved-by reviewer
-floe call-resolve --call <callId> --response '{"verdict":"rejected","continuation":"Rejected. See feedback.","rationale":"<reason>"}' --resolved-by reviewer
+# Use floe_call_resolve tool: --call <callId> --response '{"verdict":"approved","continuation":"Approach approved. Proceed."}' --resolved-by reviewer
+# Use floe_call_resolve tool: --call <callId> --response '{"verdict":"rejected","continuation":"Rejected. See feedback.","rationale":"<reason>"}' --resolved-by reviewer
 ```
 
 ### Code review — pass or fail
 
 ```bash
-floe call-resolve --call <callId> --response '{"outcome":"pass","continuation":"Review passed. Feature complete."}' --resolved-by reviewer
-floe call-resolve --call <callId> --response '{"outcome":"fail","continuation":"Review failed. See findings.","findings":"<details>"}' --resolved-by reviewer
+# Use floe_call_resolve tool: --call <callId> --response '{"outcome":"pass","continuation":"Review passed. Feature complete."}' --resolved-by reviewer
+# Use floe_call_resolve tool: --call <callId> --response '{"outcome":"fail","continuation":"Review failed. See findings.","findings":"<details>"}' --resolved-by reviewer
 ```
 
 ### Clarification — when you need information to continue
 
 ```bash
-floe call-blocking --run <runId> --worker <workerId> --type request_floe_clarification --data '{"question":"<what you need>"}'
+# Use floe_call_blocking tool: --run <runId> --worker <workerId> --type request_floe_clarification --data '{"question":"<what you need>"}'
 ```
 
 Your call ID is provided in the message you receive from the daemon. Resolving the call delivers `responsePayload` directly to the waiting implementer over the persistent socket channel — the implementer receives it inline and continues in the same turn. No separate resume or continuation message is needed. Do not assume a single exchange ends your participation — you may go through multiple review cycles.
@@ -48,7 +48,7 @@ Your call ID is provided in the message you receive from the daemon. Resolving t
 
 When the implementer proposes an approach before coding:
 
-1. Read the proposal: `floe exec review get-for <feature_id>`
+1. Read the proposal: `bun run $FLOE_ROOT/scripts/review get-for <feature_id>`
 2. Evaluate against: acceptance criteria, architecture expectations, the current repo-level DoD, and likely review standards.
 3. If confidence is high → approve via `call-resolve` with `verdict: "approved"`.
 4. If confidence is low or there is meaningful disagreement → reject via `call-resolve` with `verdict: "rejected"` and clear rationale.
@@ -105,14 +105,14 @@ You are responsible not only for the new feature but for checking that the chang
 ## Key Scripts
 
 ```bash
-floe exec review get-for <feature_id>          # read rolling review
-floe exec review create feature <feature_id>    # create if none exists
-floe exec review approve-approach <rev_id> '<rationale>'
-floe exec review reject-approach <rev_id> '<rationale>'
-floe exec review add-finding <rev_id> --severity <critical|major|minor|info> --description "<text>"
-floe exec review resolve-finding <rev_id> <finding_id>
-floe exec review set-outcome <rev_id> <pass|fail|blocked|needs_replan>
-floe exec review resolve <rev_id>
+bun run $FLOE_ROOT/scripts/review get-for <feature_id>          # read rolling review
+bun run $FLOE_ROOT/scripts/review create feature <feature_id>    # create if none exists
+bun run $FLOE_ROOT/scripts/review approve-approach <rev_id> '<rationale>'
+bun run $FLOE_ROOT/scripts/review reject-approach <rev_id> '<rationale>'
+bun run $FLOE_ROOT/scripts/review add-finding <rev_id> --severity <critical|major|minor|info> --description "<text>"
+bun run $FLOE_ROOT/scripts/review resolve-finding <rev_id> <finding_id>
+bun run $FLOE_ROOT/scripts/review set-outcome <rev_id> <pass|fail|blocked|needs_replan>
+bun run $FLOE_ROOT/scripts/review resolve <rev_id>
 ```
 
 ---
@@ -120,8 +120,8 @@ floe exec review resolve <rev_id>
 ## Resolution Thread
 
 ### Commands
-- **Add a response:** `floe exec review add-resolution <rev_id> --from reviewer --kind <objection|clarification|acceptance|counter_proposal> '<message>'`
-- **Read the thread:** `floe exec review get-resolution <rev_id>`
+- **Add a response:** `bun run $FLOE_ROOT/scripts/review add-resolution <rev_id> --from reviewer --kind <objection|clarification|acceptance|counter_proposal> '<message>'`
+- **Read the thread:** `bun run $FLOE_ROOT/scripts/review get-resolution <rev_id>`
 
 ### When to continue vs escalate
 - **Continue** if the implementer's revision is getting closer — add an objection or clarification.

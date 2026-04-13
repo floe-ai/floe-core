@@ -34,7 +34,7 @@ Use this skill whenever you need to interact with the structured delivery framew
 All commands run from the **project root** using Bun:
 
 ```bash
-floe exec <command> <subcommand> [args]
+bun run $FLOE_ROOT/scripts/<command>.ts <subcommand> [args]
 ```
 
 ## Commands
@@ -42,7 +42,7 @@ floe exec <command> <subcommand> [args]
 ### Initialise / Scaffold
 
 ```bash
-floe exec init
+bun run $FLOE_ROOT/scripts/init.ts
 ```
 
 Scaffolds the full delivery structure (`delivery/`, `docs/prd|architecture|decisions`, `.floe/state/`),
@@ -51,14 +51,14 @@ creates initial runtime state, and detects external `context-memory` availabilit
 ### State Management
 
 ```bash
-floe exec state get                         # read full runtime state
-floe exec state get mode                    # read one field
-floe exec state set-mode execute            # set mode
-floe exec state set-active release rel-v1   # set active release
-floe exec state set-active epic epic-auth   # set active epic
-floe exec state set-active feature feat-login  # set active feature
-floe exec state set-blocker missing_context "Need API spec"
-floe exec state clear-blocker
+bun run $FLOE_ROOT/scripts/state.ts get                         # read full runtime state
+bun run $FLOE_ROOT/scripts/state.ts get mode                    # read one field
+bun run $FLOE_ROOT/scripts/state.ts set-mode execute            # set mode
+bun run $FLOE_ROOT/scripts/state.ts set-active release rel-v1   # set active release
+bun run $FLOE_ROOT/scripts/state.ts set-active epic epic-auth   # set active epic
+bun run $FLOE_ROOT/scripts/state.ts set-active feature feat-login  # set active feature
+bun run $FLOE_ROOT/scripts/state.ts set-blocker missing_context "Need API spec"
+bun run $FLOE_ROOT/scripts/state.ts clear-blocker
 ```
 
 Valid modes: `initialise`, `discover`, `plan`, `execute`, `review`, `idle`
@@ -67,23 +67,23 @@ Valid modes: `initialise`, `discover`, `plan`, `execute`, `review`, `idle`
 
 ```bash
 # Create
-floe exec artefact create release --data '{"title":"MVP v1","intent":"First usable version","priority":"high"}'
-floe exec artefact create epic --data '{"title":"Auth Flow","release_id":"rel-mvp-v1","intent":"User authentication"}'
-floe exec artefact create feature --data '{"title":"Login Form","epic_id":"epic-auth-flow","behaviour":"User can log in with email/password"}'
+bun run $FLOE_ROOT/scripts/artefact.ts create release --data '{"title":"MVP v1","intent":"First usable version","priority":"high"}'
+bun run $FLOE_ROOT/scripts/artefact.ts create epic --data '{"title":"Auth Flow","release_id":"rel-mvp-v1","intent":"User authentication"}'
+bun run $FLOE_ROOT/scripts/artefact.ts create feature --data '{"title":"Login Form","epic_id":"epic-auth-flow","behaviour":"User can log in with email/password"}'
 
 # Read
-floe exec artefact get release rel-mvp-v1
-floe exec artefact list feature --status draft --parent epic-auth-flow
+bun run $FLOE_ROOT/scripts/artefact.ts get release rel-mvp-v1
+bun run $FLOE_ROOT/scripts/artefact.ts list feature --status draft --parent epic-auth-flow
 
 # Update
-floe exec artefact update feature feat-login-form --data '{"status":"active","acceptance_criteria":["Form validates email format","Shows error on wrong password"]}'
+bun run $FLOE_ROOT/scripts/artefact.ts update feature feat-login-form --data '{"status":"active","acceptance_criteria":["Form validates email format","Shows error on wrong password"]}'
 ```
 
 ### Work Selection
 
 ```bash
-floe exec select next    # select next feature per policy
-floe exec select ready   # list all ready features
+bun run $FLOE_ROOT/scripts/select.ts next    # select next feature per policy
+bun run $FLOE_ROOT/scripts/select.ts ready   # list all ready features
 ```
 
 Selection policy:
@@ -97,20 +97,20 @@ Selection policy:
 ### Reviews (Rolling)
 
 ```bash
-floe exec review create feature feat-login-form
-floe exec review get-for feat-login-form       # get open review
-floe exec review add-finding rev-xxx --severity major --description "Missing password validation"
-floe exec review resolve-finding rev-xxx f-xxx
-floe exec review set-outcome rev-xxx pass
-floe exec review resolve rev-xxx
-floe exec review list --status open
+bun run $FLOE_ROOT/scripts/review.ts create feature feat-login-form
+bun run $FLOE_ROOT/scripts/review.ts get-for feat-login-form       # get open review
+bun run $FLOE_ROOT/scripts/review.ts add-finding rev-xxx --severity major --description "Missing password validation"
+bun run $FLOE_ROOT/scripts/review.ts resolve-finding rev-xxx f-xxx
+bun run $FLOE_ROOT/scripts/review.ts set-outcome rev-xxx pass
+bun run $FLOE_ROOT/scripts/review.ts resolve rev-xxx
+bun run $FLOE_ROOT/scripts/review.ts list --status open
 ```
 
 ### Summaries
 
 ```bash
-floe exec summary create --data '{"target_type":"feature","target_id":"feat-login","kind":"run","content":"Implemented login form with validation","what_happened":"Added LoginForm component with email/password fields"}'
-floe exec summary list --target feat-login
+bun run $FLOE_ROOT/scripts/summary.ts create --data '{"target_type":"feature","target_id":"feat-login","kind":"run","content":"Implemented login form with validation","what_happened":"Added LoginForm component with email/password fields"}'
+bun run $FLOE_ROOT/scripts/summary.ts list --target feat-login
 ```
 
 If external `context-memory` is available, summaries are automatically registered with memory.
@@ -118,18 +118,18 @@ If external `context-memory` is available, summaries are automatically registere
 ### Notes Inbox
 
 ```bash
-floe exec note create --data '{"source":"user-chat","kind":"idea","summary":"Consider OAuth support later","confidence":0.7}'
-floe exec note list --kind idea --status captured
-floe exec note search "oauth"
-floe exec note promote note-xxx feature feat-oauth
+bun run $FLOE_ROOT/scripts/note.ts create --data '{"source":"user-chat","kind":"idea","summary":"Consider OAuth support later","confidence":0.7}'
+bun run $FLOE_ROOT/scripts/note.ts list --kind idea --status captured
+bun run $FLOE_ROOT/scripts/note.ts search "oauth"
+bun run $FLOE_ROOT/scripts/note.ts promote note-xxx feature feat-oauth
 ```
 
 ### Validation
 
 ```bash
-floe exec validate all               # full consistency check
-floe exec validate artefact feature feat-login  # validate one item
-floe exec validate state             # validate runtime state
+bun run $FLOE_ROOT/scripts/validate.ts all               # full consistency check
+bun run $FLOE_ROOT/scripts/validate.ts artefact feature feat-login  # validate one item
+bun run $FLOE_ROOT/scripts/validate.ts state             # validate runtime state
 ```
 
 ## Artefact Types
@@ -160,8 +160,8 @@ floe exec validate state             # validate runtime state
 
 ## Related Skills
 
-- `skills/sizing-heuristics/SKILL.md` — canonical sizing rules shared across roles
-- `skills/floe-preflight/SKILL.md` — setup, readiness checks, model configuration, git/remote setup
+- **sizing-heuristics** (`/skill:sizing-heuristics`) — canonical sizing rules shared across roles
+- **floe-preflight** (`/skill:floe-preflight`) — setup, readiness checks, model configuration, git/remote setup
 
 ## External Memory Integration
 
@@ -269,6 +269,6 @@ Active and historical worker sessions are tracked in:
 
 To inspect active sessions:
 ```bash
-floe exec sessions active
-floe exec sessions list --feature <id>
+bun run $FLOE_ROOT/scripts/sessions.ts active
+bun run $FLOE_ROOT/scripts/sessions.ts list --feature <id>
 ```
