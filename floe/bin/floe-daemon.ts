@@ -8,6 +8,7 @@ import { DaemonService } from "../runtime/daemon/service.ts";
 import { DaemonServer, type ListenTarget } from "../runtime/daemon/server.ts";
 import { WaiterRegistry, WorkerConnectionRegistry } from "../runtime/daemon/worker-channel.ts";
 import type { WorkerChannelCallbacks, } from "../runtime/daemon/worker-channel.ts";
+import { PiSubstrate } from "../runtime/substrate/pi.ts";
 
 function findProjectRoot(): string {
   let dir = process.cwd();
@@ -58,6 +59,10 @@ async function main(): Promise<void> {
 
   const service = new DaemonService(projectRoot, endpointLabel);
   await service.init();
+
+  // Wire the Pi session substrate — the sole session host for all worker sessions.
+  const piSubstrate = new PiSubstrate();
+  service.setSubstrate(piSubstrate);
 
   const waiters = new WaiterRegistry();
   const workerConnections = new WorkerConnectionRegistry();

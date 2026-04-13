@@ -2,38 +2,67 @@
 
 This document defines source-of-truth boundaries for `floe-core`.
 
-## Canonical Product Payload
+## Global Engine (`floe/`)
 
 Everything under `floe/` is the product engine — globally installed.
 
-- `floe/roles/` is the canonical role source (floe, planner, implementer, reviewer).
-- `floe/skills/` is the canonical skill source.
-- `floe/schemas/`, `floe/scripts/`, `floe/runtime/`, and `floe/bin/` are canonical runtime/tooling sources.
+| Path | Owns |
+|------|------|
+| `floe/bin/` | CLI entrypoint (`floe.ts`), daemon process (`floe-daemon.ts`) |
+| `floe/roles/` | Canonical role definitions (floe, planner, implementer, reviewer) |
+| `floe/skills/` | Canonical skill definitions (floe-exec, floe-preflight, sizing-heuristics) |
+| `floe/schemas/` | JSON schemas for all durable artefact types |
+| `floe/scripts/` | Deterministic Bun scripts for state/artefact operations |
+| `floe/runtime/daemon/` | Daemon service, event store, feature workflow engine, persistent socket transport |
+| `floe/runtime/substrate/` | Pi session substrate — sole session host for all worker sessions |
+| `floe/runtime/registry.ts` | Session registry (in-memory + persistent) |
 
-These are loaded by the Floe runtime as part of its global config. They are not copied into each project.
+These are loaded by the Floe runtime from the global install location. They are **not** copied into each project.
 
-## Non-Canonical Project Files
+## Project-Local State (`.floe/`)
 
-Anything outside `floe/` is repository build/support context unless explicitly documented.
+Running `floe init` (or first `floe` run) creates minimal project-local state:
 
-- `scripts/` (repo root) contains installer and packaging logic.
-- `docs/` contains design docs and operating notes.
+| Path | Purpose | VCS |
+|------|---------|-----|
+| `.floe/config.json` | Project configuration (model settings, srcRoot, overrides) | Committed |
+| `.floe/dod.json` | Project-level definition of done | Committed |
+| `.floe/state/` | Runtime state (sessions, daemon, events) | Gitignored |
+| `.floe/roles/` | (optional) Project-local role overrides | Committed |
+| `.floe/skills/` | (optional) Project-local skill overrides | Committed |
 
-## Skill Loading Model
+**No framework code is copied.** The `.floe/` directory holds configuration and state only.
 
-Canonical Floe skills are part of the global Floe runtime. They are loaded by the runtime and available to agents automatically.
+## Role & Skill Loading
 
-- Canonical skills: `floe-exec`, `floe-preflight`, `sizing-heuristics`
-- Project-local overrides: `.floe/skills/<skill-name>/SKILL.md` — opt-in, completely replaces the global version for that project
+Canonical roles and skills are part of the global Floe runtime. The daemon loads them automatically from the global install location.
 
-Scripts and executables referenced by skills are part of the Floe runtime and are never duplicated per-project.
+- **Project-local override** (`.floe/roles/planner.md`) completely replaces the global version for that project.
+- **No resolution chain** — global skills are loaded as part of the runtime's own config; project-local overrides are a full replacement, not a fallback.
+- **No per-project script copies** — scripts and executables are part of the global engine.
+
+## Pi Session Substrate
+
+The Pi substrate (`floe/runtime/substrate/pi.ts`) is the sole session host:
+
+- All worker sessions (floe, planner, implementer, reviewer) are Pi-hosted
+- Pi manages in-memory sessions with conversation history
+- Pi routes model API calls based on model identifier (Anthropic, OpenAI)
+- There is no adapter pattern — Pi is the substrate, not one of many backends
 
 ## Session ID Contract
 
-Worker session IDs include the role as a prefix for log readability:
+Worker session IDs include the role as a prefix:
 
 - Format: `<role>-<timestamp>-<random>`
 - Example: `implementer-m5x8k2-a7b3c9`
+
+## Non-Canonical Files
+
+Anything outside `floe/` is repository build/support context:
+
+- `scripts/` (repo root) — installer and project initialisation
+- `docs/` — design docs and operating notes
 
 ## Context Memory Contract
 

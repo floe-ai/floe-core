@@ -9,7 +9,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import {
   paths, readJson, listArtefacts, validateArtefact, findArtefact,
   output, fail,
@@ -18,6 +18,9 @@ import {
 const p = paths();
 const [cmd, arg1, arg2] = Bun.argv.slice(2);
 
+// Resolve the global Floe engine root (this script lives in floe/scripts/)
+const floeEngineRoot = resolve(dirname(import.meta.dir));
+
 interface Issue {
   severity: "error" | "warning";
   type: string;
@@ -25,28 +28,31 @@ interface Issue {
   message: string;
 }
 
-const REQUIRED_CANONICAL_FILES = [
-  ".floe/roles/floe.md",
-  ".floe/roles/planner.md",
-  ".floe/roles/implementer.md",
-  ".floe/roles/reviewer.md",
-  ".floe/skills/floe-exec/SKILL.md",
-  ".floe/skills/floe-preflight/SKILL.md",
-  ".floe/skills/sizing-heuristics/SKILL.md",
-  ".floe/schemas/dod.json",
+// Canonical files that must exist in the global Floe install
+const REQUIRED_GLOBAL_FILES = [
+  "roles/floe.md",
+  "roles/planner.md",
+  "roles/implementer.md",
+  "roles/reviewer.md",
+  "skills/floe-exec/SKILL.md",
+  "skills/floe-preflight/SKILL.md",
+  "skills/sizing-heuristics/SKILL.md",
+  "schemas/dod.json",
 ] as const;
 
 function validateFrameworkContract(issues: Issue[]): void {
-  for (const relPath of REQUIRED_CANONICAL_FILES) {
-    if (!existsSync(join(p.root, relPath))) {
+  // Check global engine canonical files
+  for (const relPath of REQUIRED_GLOBAL_FILES) {
+    if (!existsSync(join(floeEngineRoot, relPath))) {
       issues.push({
         severity: "error",
         type: "framework",
-        message: `Missing canonical file: ${relPath}`,
+        message: `Missing canonical file in global install: ${relPath}`,
       });
     }
   }
 
+  // Check project-local DoD
   const dodPath = join(p.floe, "dod.json");
   if (!existsSync(dodPath)) {
     issues.push({
