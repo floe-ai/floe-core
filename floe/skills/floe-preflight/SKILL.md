@@ -33,13 +33,13 @@ Run these checks in order. Stop at the first failure and address it before conti
 ### 1. Framework presence
 
 ```bash
-bun run .floe/scripts/state.ts get
+floe exec state get
 ```
 
 If this fails or `.floe/` is missing:
 
 ```bash
-bun run .floe/scripts/init.ts
+floe exec init
 ```
 
 This scaffolds the full delivery structure, creates runtime state, and initialises a local git repository.
@@ -55,7 +55,7 @@ After init, check `git_initialised` in the response. If `true`, the repo is read
 If the user provides a URL:
 
 ```bash
-bun run .floe/scripts/init.ts --remote <url> [--branch main]
+floe exec init --remote <url> [--branch main]
 ```
 
 - HTTPS remotes: configures `credential.helper` (osxkeychain on macOS, wincred on Windows, store on Linux)
@@ -64,24 +64,24 @@ bun run .floe/scripts/init.ts --remote <url> [--branch main]
 
 Check `remote_setup.ok` in the response. If `false`, surface the error.
 
-If the user skips: proceed. They can add a remote later with `bun run .floe/scripts/init.ts --remote <url>`.
+If the user skips: proceed. They can add a remote later with `floe exec init --remote <url>`.
 
 ### 3. Model configuration
 
 ```bash
-bun run .floe/bin/floe.ts show-config
+floe show-config
 ```
 
 If config is missing or `configured` is `false`:
 
 ```bash
-bun run .floe/bin/floe.ts configure
+floe configure
 ```
 
 Present the user with model options and recommend a default. Once the user agrees:
 
 ```bash
-bun run .floe/bin/floe.ts configure --model <model> --thinking <level>
+floe configure --model <model> --thinking <level>
 ```
 
 **Rules:**
@@ -102,8 +102,8 @@ This skill can be re-invoked at any time if readiness is lost (e.g. config wiped
 
 When the user mentions a model or thinking level in plain text during normal operation:
 
-1. Check current config: `bun run .floe/bin/floe.ts show-config`
-2. Apply: `bun run .floe/bin/floe.ts update-config --role <role|all> --model <exact-id> [--thinking <level>]`
+1. Check current config: `floe show-config`
+2. Apply: `floe update-config --role <role|all> --model <exact-id> [--thinking <level>]`
 3. Confirm what changed.
 
 If no config exists, run the full preflight flow.

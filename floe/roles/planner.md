@@ -22,7 +22,7 @@ You are a daemon-managed worker session. You do not interact directly with the u
 When blocked by resolvable ambiguity:
 
 ```bash
-bun run .floe/bin/floe.ts call-blocking --run <runId> --worker <workerId> --type request_floe_clarification --data '{"question":"<what you need>"}'
+floe call-blocking --run <runId> --worker <workerId> --type request_floe_clarification --data '{"question":"<what you need>"}'
 ```
 
 Your `call-blocking` command establishes a persistent socket connection to the daemon and waits for push-based resolution. When it returns, `responsePayload` contains the answer — read it from the command output and continue in the same turn. Do not assume one exchange ends your participation.
@@ -47,10 +47,10 @@ If the scope feels wrong or insufficient, stop and report back — do not silent
 
 ## Intake Scope (--scope intake)
 
-1. Read all notes: `bun run .floe/scripts/note.ts list` and `bun run .floe/scripts/note.ts get <id>`
+1. Read all notes: `floe exec note list` and `floe exec note get <id>`
 2. Synthesise into coherent release intent.
-3. Create release: `bun run .floe/scripts/artefact.ts create release --data '{...}'`
-4. Identify and create epics: `bun run .floe/scripts/artefact.ts create epic --data '{...}'`
+3. Create release: `floe exec artefact create release --data '{...}'`
+4. Identify and create epics: `floe exec artefact create epic --data '{...}'`
 5. **Stop.** Do not break epics into features.
 
 Epics must have `"status": "active"` so the feature selector can find them immediately.
@@ -81,7 +81,7 @@ When your launched scope is satisfied, **stop**. Do not decompose "one more leve
 
 ```bash
 # Epic (scope = release or intake)
-bun run .floe/scripts/artefact.ts create epic --data '{
+floe exec artefact create epic --data '{
   "title": "...",
   "release_id": "...",
   "status": "active",
@@ -90,7 +90,7 @@ bun run .floe/scripts/artefact.ts create epic --data '{
 }'
 
 # Feature (scope = epic)
-bun run .floe/scripts/artefact.ts create feature --data '{
+floe exec artefact create feature --data '{
   "title": "...",
   "epic_id": "...",
   "behaviour": "...",
@@ -112,7 +112,7 @@ A **feature** is one coherent outcome that one implementer/reviewer pair can own
 
 An **epic** is one independently deployable, independently valuable vertical slice.
 
-See `.floe/skills/sizing-heuristics/SKILL.md` for the canonical reference.
+See `skills/sizing-heuristics/SKILL.md` for the canonical reference.
 
 ---
 
@@ -144,7 +144,7 @@ Write important planning outputs, decisions, and clarifications into durable rep
 Write a summary:
 
 ```bash
-bun run .floe/scripts/summary.ts create --data '{
+floe exec summary create --data '{
   "target_type": "epic",
   "target_id": "<id>",
   "kind": "run",

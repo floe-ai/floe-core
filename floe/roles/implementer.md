@@ -35,7 +35,7 @@ You coordinate with other participants through the daemon's blocking-call system
 | Review findings fixed, ready for re-review | `call-blocking --type revision_ready --feature <featureId>` |
 | Blocked by missing information from the user | `call-blocking --type request_floe_clarification --data '{"question":"<what you need>"}'` |
 
-All calls: `bun run .floe/bin/floe.ts call-blocking --run <runId> --worker <workerId> --type <type> --feature <featureId>`
+All calls: `floe call-blocking --run <runId> --worker <workerId> --type <type> --feature <featureId>`
 
 When `call-blocking` returns, check `responsePayload` in the JSON output for the resolution (verdict, outcome, continuation instructions). Act on it immediately — you are still mid-turn.
 
@@ -45,11 +45,11 @@ When `call-blocking` returns, check `responsePayload` in the JSON output for the
 
 **Before significant coding**, propose a concrete execution approach:
 
-1. Read the feature: `bun run .floe/scripts/artefact.ts get feature <id>`
-2. Read or create the rolling review: `bun run .floe/scripts/review.ts get-for <feature_id>`
+1. Read the feature: `floe exec artefact get feature <id>`
+2. Read or create the rolling review: `floe exec review get-for <feature_id>`
 3. If a DoD is injected into your session context, read it and address each **required** criterion in your proposal.
-4. Record the proposal: `bun run .floe/scripts/review.ts set-approach <rev_id> '<proposal>'`
-5. Signal readiness: `bun run .floe/bin/floe.ts call-blocking --run <runId> --worker <workerId> --type request_approach_review --feature <featureId>`
+4. Record the proposal: `floe exec review set-approach <rev_id> '<proposal>'`
+5. Signal readiness: `floe call-blocking --run <runId> --worker <workerId> --type request_approach_review --feature <featureId>`
 6. `call-blocking` will block until the reviewer resolves it. Read the resolution from the command output (`responsePayload.verdict`).
 7. If rejected, revise and re-signal. Do not silently proceed.
 
@@ -64,7 +64,7 @@ This step is mandatory.
 3. Verify locally — smallest relevant check first (unit tests, type check), then broader tests.
 4. When a build pipeline is involved, verify the **compiled artefact** works — not just the source. Source tests passing is necessary but not sufficient.
 5. Write a run summary (see below).
-6. Signal readiness for code review: `bun run .floe/bin/floe.ts call-blocking --run <runId> --worker <workerId> --type request_code_review --feature <featureId>` — **do not stop without issuing this call**
+6. Signal readiness for code review: `floe call-blocking --run <runId> --worker <workerId> --type request_code_review --feature <featureId>` — **do not stop without issuing this call**
 7. `call-blocking` blocks until the reviewer resolves it. Read the resolution from the command output (`responsePayload.outcome`). If `outcome` is `fail`, address findings and re-signal with `--type revision_ready`. Continue until `outcome` is `pass`.
 
 ---
@@ -92,7 +92,7 @@ When the feature produces a new runnable application or significantly changes ho
 After each implementation run:
 
 ```bash
-bun run .floe/scripts/summary.ts create --data '{
+floe exec summary create --data '{
   "target_type": "feature",
   "target_id": "<id>",
   "kind": "run",
@@ -131,8 +131,8 @@ If you cannot complete the feature and clarification cannot unblock it, classify
 Record on the feature and set the blocker:
 
 ```bash
-bun run .floe/scripts/artefact.ts update feature <id> --data '{"execution_state":{"last_run_outcome":"fail","last_failure_class":"<class>"}}'
-bun run .floe/scripts/state.ts set-blocker <class> "<description>"
+floe exec artefact update feature <id> --data '{"execution_state":{"last_run_outcome":"fail","last_failure_class":"<class>"}}'
+floe exec state set-blocker <class> "<description>"
 ```
 
 ---
@@ -140,9 +140,9 @@ bun run .floe/scripts/state.ts set-blocker <class> "<description>"
 ## Resolution Thread
 
 ### Commands
-- **Revise approach:** `bun run .floe/scripts/review.ts add-resolution <rev_id> --from implementer --kind revised_approach '<text>'`
-- **Ask clarification:** `bun run .floe/scripts/review.ts add-resolution <rev_id> --from implementer --kind clarification '<question>'`
-- **Read thread:** `bun run .floe/scripts/review.ts get-resolution <rev_id>`
+- **Revise approach:** `floe exec review add-resolution <rev_id> --from implementer --kind revised_approach '<text>'`
+- **Ask clarification:** `floe exec review add-resolution <rev_id> --from implementer --kind clarification '<question>'`
+- **Read thread:** `floe exec review get-resolution <rev_id>`
 
 ---
 

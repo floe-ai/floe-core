@@ -1,15 +1,17 @@
 {
   "name": "floe-core",
-  "version": "0.2.0",
-  "description": "Repo-local execution framework for AI coding agents. Structured delivery with releases, epics, features, reviews, summaries, and notes. CLI-based worker session management.",
+  "version": "0.3.0",
+  "description": "Globally-installed AI agent runtime. Pi-native daemon with structured delivery: releases, epics, features, reviews, and autonomous worker coordination.",
   "bin": {
-    "floe-core": "scripts/install.ts"
+    "floe": "floe/bin/floe.ts",
+    "floe-daemon": "floe/bin/floe-daemon.ts",
+    "floe-init": "scripts/install.ts"
   },
   "files": [
     "scripts/",
     "floe/"
   ],
-  "keywords": ["ai", "agent", "execution", "delivery", "framework", "codex", "copilot", "claude"],
+  "keywords": ["ai", "agent", "runtime", "daemon", "delivery", "framework", "floe"],
   "license": "MIT",
   "repository": {
     "type": "git",

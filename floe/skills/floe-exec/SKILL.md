@@ -34,7 +34,7 @@ Use this skill whenever you need to interact with the structured delivery framew
 All commands run from the **project root** using Bun:
 
 ```bash
-bun run .floe/scripts/<command>.ts <subcommand> [args]
+floe exec <command> <subcommand> [args]
 ```
 
 ## Commands
@@ -42,7 +42,7 @@ bun run .floe/scripts/<command>.ts <subcommand> [args]
 ### Initialise / Scaffold
 
 ```bash
-bun run .floe/scripts/init.ts
+floe exec init
 ```
 
 Scaffolds the full delivery structure (`delivery/`, `docs/prd|architecture|decisions`, `.floe/state/`),
@@ -51,14 +51,14 @@ creates initial runtime state, and detects external `context-memory` availabilit
 ### State Management
 
 ```bash
-bun run .floe/scripts/state.ts get                         # read full runtime state
-bun run .floe/scripts/state.ts get mode                    # read one field
-bun run .floe/scripts/state.ts set-mode execute            # set mode
-bun run .floe/scripts/state.ts set-active release rel-v1   # set active release
-bun run .floe/scripts/state.ts set-active epic epic-auth   # set active epic
-bun run .floe/scripts/state.ts set-active feature feat-login  # set active feature
-bun run .floe/scripts/state.ts set-blocker missing_context "Need API spec"
-bun run .floe/scripts/state.ts clear-blocker
+floe exec state get                         # read full runtime state
+floe exec state get mode                    # read one field
+floe exec state set-mode execute            # set mode
+floe exec state set-active release rel-v1   # set active release
+floe exec state set-active epic epic-auth   # set active epic
+floe exec state set-active feature feat-login  # set active feature
+floe exec state set-blocker missing_context "Need API spec"
+floe exec state clear-blocker
 ```
 
 Valid modes: `initialise`, `discover`, `plan`, `execute`, `review`, `idle`
@@ -67,23 +67,23 @@ Valid modes: `initialise`, `discover`, `plan`, `execute`, `review`, `idle`
 
 ```bash
 # Create
-bun run .floe/scripts/artefact.ts create release --data '{"title":"MVP v1","intent":"First usable version","priority":"high"}'
-bun run .floe/scripts/artefact.ts create epic --data '{"title":"Auth Flow","release_id":"rel-mvp-v1","intent":"User authentication"}'
-bun run .floe/scripts/artefact.ts create feature --data '{"title":"Login Form","epic_id":"epic-auth-flow","behaviour":"User can log in with email/password"}'
+floe exec artefact create release --data '{"title":"MVP v1","intent":"First usable version","priority":"high"}'
+floe exec artefact create epic --data '{"title":"Auth Flow","release_id":"rel-mvp-v1","intent":"User authentication"}'
+floe exec artefact create feature --data '{"title":"Login Form","epic_id":"epic-auth-flow","behaviour":"User can log in with email/password"}'
 
 # Read
-bun run .floe/scripts/artefact.ts get release rel-mvp-v1
-bun run .floe/scripts/artefact.ts list feature --status draft --parent epic-auth-flow
+floe exec artefact get release rel-mvp-v1
+floe exec artefact list feature --status draft --parent epic-auth-flow
 
 # Update
-bun run .floe/scripts/artefact.ts update feature feat-login-form --data '{"status":"active","acceptance_criteria":["Form validates email format","Shows error on wrong password"]}'
+floe exec artefact update feature feat-login-form --data '{"status":"active","acceptance_criteria":["Form validates email format","Shows error on wrong password"]}'
 ```
 
 ### Work Selection
 
 ```bash
-bun run .floe/scripts/select.ts next    # select next feature per policy
-bun run .floe/scripts/select.ts ready   # list all ready features
+floe exec select next    # select next feature per policy
+floe exec select ready   # list all ready features
 ```
 
 Selection policy:
@@ -97,20 +97,20 @@ Selection policy:
 ### Reviews (Rolling)
 
 ```bash
-bun run .floe/scripts/review.ts create feature feat-login-form
-bun run .floe/scripts/review.ts get-for feat-login-form       # get open review
-bun run .floe/scripts/review.ts add-finding rev-xxx --severity major --description "Missing password validation"
-bun run .floe/scripts/review.ts resolve-finding rev-xxx f-xxx
-bun run .floe/scripts/review.ts set-outcome rev-xxx pass
-bun run .floe/scripts/review.ts resolve rev-xxx
-bun run .floe/scripts/review.ts list --status open
+floe exec review create feature feat-login-form
+floe exec review get-for feat-login-form       # get open review
+floe exec review add-finding rev-xxx --severity major --description "Missing password validation"
+floe exec review resolve-finding rev-xxx f-xxx
+floe exec review set-outcome rev-xxx pass
+floe exec review resolve rev-xxx
+floe exec review list --status open
 ```
 
 ### Summaries
 
 ```bash
-bun run .floe/scripts/summary.ts create --data '{"target_type":"feature","target_id":"feat-login","kind":"run","content":"Implemented login form with validation","what_happened":"Added LoginForm component with email/password fields"}'
-bun run .floe/scripts/summary.ts list --target feat-login
+floe exec summary create --data '{"target_type":"feature","target_id":"feat-login","kind":"run","content":"Implemented login form with validation","what_happened":"Added LoginForm component with email/password fields"}'
+floe exec summary list --target feat-login
 ```
 
 If external `context-memory` is available, summaries are automatically registered with memory.
@@ -118,18 +118,18 @@ If external `context-memory` is available, summaries are automatically registere
 ### Notes Inbox
 
 ```bash
-bun run .floe/scripts/note.ts create --data '{"source":"user-chat","kind":"idea","summary":"Consider OAuth support later","confidence":0.7}'
-bun run .floe/scripts/note.ts list --kind idea --status captured
-bun run .floe/scripts/note.ts search "oauth"
-bun run .floe/scripts/note.ts promote note-xxx feature feat-oauth
+floe exec note create --data '{"source":"user-chat","kind":"idea","summary":"Consider OAuth support later","confidence":0.7}'
+floe exec note list --kind idea --status captured
+floe exec note search "oauth"
+floe exec note promote note-xxx feature feat-oauth
 ```
 
 ### Validation
 
 ```bash
-bun run .floe/scripts/validate.ts all               # full consistency check
-bun run .floe/scripts/validate.ts artefact feature feat-login  # validate one item
-bun run .floe/scripts/validate.ts state             # validate runtime state
+floe exec validate all               # full consistency check
+floe exec validate artefact feature feat-login  # validate one item
+floe exec validate state             # validate runtime state
 ```
 
 ## Artefact Types
@@ -160,8 +160,8 @@ bun run .floe/scripts/validate.ts state             # validate runtime state
 
 ## Related Skills
 
-- `.floe/skills/sizing-heuristics/SKILL.md` — canonical sizing rules shared across roles
-- `.floe/skills/floe-preflight/SKILL.md` — setup, readiness checks, model configuration, git/remote setup
+- `skills/sizing-heuristics/SKILL.md` — canonical sizing rules shared across roles
+- `skills/floe-preflight/SKILL.md` — setup, readiness checks, model configuration, git/remote setup
 
 ## External Memory Integration
 
@@ -200,7 +200,7 @@ The **Planner, Implementer, and Reviewer** are worker sessions launched and coor
 The floe CLI manages worker sessions. Run from the project root:
 
 ```bash
-bun run .floe/bin/floe.ts <command> [options]
+floe <command> [options]
 ```
 
 Available commands:
@@ -225,14 +225,14 @@ Workers are identified by a `sessionId` returned when launched. All session stat
 ### Floe workflow with CLI
 
 ```
-1. Launch: bun run .floe/bin/floe.ts manage-feature-pair --feature <id>
+1. Launch: floe manage-feature-pair --feature <id>
    → Returns { ok: true, runId, implementer, reviewer }
    → Daemon bootstraps implementer and subscribes to events autonomously
 
-2. Observe: bun run .floe/bin/floe.ts events-subscribe --run <runId> --wait-ms 300000
+2. Observe: floe events-subscribe --run <runId> --wait-ms 300000
    → Watch for: workflow.progress, call.pending, call.resolved, run.completed, run.escalated
 
-3. Check state: bun run .floe/bin/floe.ts run-get --run <runId>
+3. Check state: floe run-get --run <runId>
 
 4. Intervene only on escalation or floe clarification requests.
 
@@ -249,13 +249,13 @@ This step is **mandatory** before substantial coding begins on any feature.
 
 1. **Implementer** proposes execution approach via:
    ```bash
-   bun run .floe/scripts/review.ts set-approach <rev_id> '<proposal>'
+   floe exec review set-approach <rev_id> '<proposal>'
    ```
 2. **Reviewer** reads and evaluates the proposal:
    ```bash
-   bun run .floe/scripts/review.ts approve-approach <rev_id> '<rationale>'
+   floe exec review approve-approach <rev_id> '<rationale>'
    # or
-   bun run .floe/scripts/review.ts reject-approach <rev_id> '<rationale>'
+   floe exec review reject-approach <rev_id> '<rationale>'
    ```
 3. If rejected or escalated, **floe** surfaces to the user before proceeding.
 
@@ -269,6 +269,6 @@ Active and historical worker sessions are tracked in:
 
 To inspect active sessions:
 ```bash
-bun run .floe/scripts/sessions.ts active
-bun run .floe/scripts/sessions.ts list --feature <id>
+floe exec sessions active
+floe exec sessions list --feature <id>
 ```

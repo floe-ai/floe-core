@@ -2,7 +2,7 @@
 /**
  * floe CLI — dispatches to the daemon runtime for worker and feature management.
  *
- * Usage: bun run .floe/bin/floe.ts <command> [options]
+ * Usage: floe <command> [options]
  *
  * Feature execution (daemon-native — primary model):
  *   manage-feature-pair  Launch implementer + reviewer pair (daemon-native workflow)
@@ -435,7 +435,7 @@ async function launchWorker(args: Record<string, any>) {
   // Pre-flight: config must be set up before any worker can launch
   const config = loadConfig(projectRoot);
   if (config?.configured === false) {
-    return { ok: false, error: "Floe not configured. Run: bun run .floe/bin/floe.ts configure" };
+    return { ok: false, error: "Floe not configured. Run: floe configure" };
   }
 
   // Planner scope validation
@@ -637,7 +637,7 @@ async function manageFeaturePair(args: Record<string, any>) {
 
   // Pre-flight: config must be set up
   if (config?.configured === false) {
-    return { ok: false, error: "Floe not configured. Run: bun run .floe/bin/floe.ts configure" };
+    return { ok: false, error: "Floe not configured. Run: floe configure" };
   }
 
   // Resolve model config for implementer and reviewer
@@ -714,13 +714,13 @@ async function checkAlignment(args: Record<string, any>) {
 
 async function showDod(_args: Record<string, any>) {
   const dod = loadDod(projectRoot);
-  if (!dod) return { ok: false, error: "No .floe/dod.json found. Create one or run: bun run .floe/scripts/init.ts" };
+  if (!dod) return { ok: false, error: "No .floe/dod.json found. Create one or run: floe exec init" };
   return { ok: true, version: dod.version, criteria: dod.criteria, notes: dod.notes, formatted: formatDodForPrompt(dod) };
 }
 
 async function editDod(_args: Record<string, any>) {
   const dodPath = join(projectRoot, ".floe", "dod.json");
-  if (!existsSync(dodPath)) return { ok: false, error: "No .floe/dod.json found. Create one or run: bun run .floe/scripts/init.ts" };
+  if (!existsSync(dodPath)) return { ok: false, error: "No .floe/dod.json found. Create one or run: floe exec init" };
   const editor = process.env.EDITOR || "vi";
   const { spawnSync } = await import("node:child_process");
   spawnSync(editor, [dodPath], { stdio: "inherit" });
@@ -812,7 +812,7 @@ async function configureCommand(args: Record<string, any>) {
 async function showConfig(_args: Record<string, any>) {
   const config = loadConfig(projectRoot);
   if (!config) {
-    return { ok: false, error: "No .floe/config.json found. Run: bun run .floe/bin/floe.ts configure" };
+    return { ok: false, error: "No .floe/config.json found. Run: floe configure" };
   }
   return {
     ok: true,
@@ -975,6 +975,41 @@ async function callBlockingAndWait(args: Record<string, any>): Promise<Record<st
   };
 }
 
+// ─── Script exec handler ─────────────────────────────────────────────
+
+/**
+ * `floe exec <script> [args...]` — runs a Floe script from the global install.
+ * Scripts are located at $FLOE_ROOT/floe/scripts/<script>.ts.
+ * Falls back to resolving relative to this file's location.
+ */
+async function execScript(_opts: Record<string, any>): Promise<any> {
+  const scriptArgs = Bun.argv.slice(3); // everything after "exec"
+  const scriptName = scriptArgs[0];
+  if (!scriptName) {
+    return { ok: false, error: "Usage: floe exec <script> [args...]\nAvailable scripts: artefact, escalation, init, note, review, select, sessions, state, summary, validate" };
+  }
+  const scriptPassthrough = scriptArgs.slice(1);
+
+  // Resolve from FLOE_ROOT or relative to this binary
+  const floeRootDir = process.env.FLOE_ROOT || join(dirname(import.meta.dir));
+  const scriptPath = join(floeRootDir, "scripts", `${scriptName}.ts`);
+  if (!existsSync(scriptPath)) {
+    return { ok: false, error: `Script not found: ${scriptName} (looked at ${scriptPath})` };
+  }
+
+  const proc = Bun.spawn(["bun", "run", scriptPath, ...scriptPassthrough], {
+    cwd: process.cwd(),
+    stdout: "inherit",
+    stderr: "inherit",
+    stdin: "inherit",
+    env: { ...process.env },
+  });
+  const exitCode = await proc.exited;
+  return exitCode === 0
+    ? { ok: true }
+    : { ok: false, error: `Script ${scriptName} exited with code ${exitCode}` };
+}
+
 // ─── CLI dispatch ────────────────────────────────────────────────────
 
 const [command, ...rest] = Bun.argv.slice(2);
@@ -1024,6 +1059,33 @@ const { values: opts } = parseArgs({
 });
 
 async function main() {
+  // Auto-init: if no .floe/ exists in the project root, silently initialise it
+  // (skip for commands that don't need project state)
+  const noInitCommands = new Set(["exec", "configure", "show-config"]);
+  if (command && !noInitCommands.has(command)) {
+    const projectRoot = findProjectRoot();
+    const floeDir = join(projectRoot, ".floe");
+    if (!existsSync(floeDir)) {
+      // Minimal auto-init: create .floe with config.json, dod.json, state/, .gitignore
+      mkdirSync(floeDir, { recursive: true });
+      mkdirSync(join(floeDir, "state"), { recursive: true });
+      const defaultConfig = { defaultProvider: "pi", enabledProviders: ["pi"], configured: false };
+      writeFileSync(join(floeDir, "config.json"), JSON.stringify(defaultConfig, null, 2));
+      const defaultDod = {
+        criteria: [
+          "Code compiles and passes all existing tests",
+          "New behaviour has test coverage",
+          "No regressions introduced",
+          "Changes follow existing project conventions"
+        ]
+      };
+      writeFileSync(join(floeDir, "dod.json"), JSON.stringify(defaultDod, null, 2));
+      const gitignore = "state/\n*.log\n";
+      writeFileSync(join(floeDir, ".gitignore"), gitignore);
+      console.error(`[floe] Initialised .floe/ in ${projectRoot}`);
+    }
+  }
+
   const commands: Record<string, (args: Record<string, any>) => Promise<any>> = {
     "launch-worker": launchWorker,
     "resume-worker": resumeWorker,
@@ -1101,6 +1163,9 @@ async function main() {
     "route-reply": daemonCommand("route.reply"),
     "events-subscribe": daemonCommand("events.subscribe"),
     "events-replay": daemonCommand("events.replay"),
+
+    // Script execution
+    "exec": execScript,
   };
 
   const handler = commands[command];

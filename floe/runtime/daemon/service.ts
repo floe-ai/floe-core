@@ -129,6 +129,9 @@ export class DaemonService {
     // Export daemon endpoint so child processes (worker tool-call subshells) can
     // use the persistent socket channel instead of CLI polling.
     process.env.FLOE_DAEMON_ENDPOINT = this.socketPath;
+    // Export the global Floe engine root so workers and scripts can resolve
+    // canonical roles, skills, schemas, and scripts from the global install.
+    process.env.FLOE_ROOT = floeRoot();
     this.store.emitEvent({ type: "runtime.started", data: { pid: process.pid, socketPath: this.socketPath } });
   }
 
