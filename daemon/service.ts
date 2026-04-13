@@ -85,6 +85,9 @@ function makeId(prefix: string): string {
  * Layout: daemon/service.ts → package root is 1 level up.
  */
 function floeRoot(): string {
+  // Prefer the FLOE_ROOT env var (set by bin/floe to ~/.floe).
+  // Fall back to the package root (for tests and direct daemon invocation).
+  if (process.env.FLOE_ROOT) return resolve(process.env.FLOE_ROOT);
   const thisDir =
     (import.meta as any).dir ??
     (typeof __dirname !== "undefined" ? __dirname : dirname(fileURLToPath(import.meta.url)));

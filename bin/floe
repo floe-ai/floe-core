@@ -3,14 +3,14 @@
 # floe — Structured AI delivery agent powered by Pi.
 #
 # This wrapper:
-#   1. Ensures Pi is installed
-#   2. Ensures Bun is installed (for the daemon)
+#   1. Ensures Pi (Node/npm) and Bun are installed
+#   2. Syncs floe resources (skills, prompts, scripts, extension) to ~/.floe/
 #   3. Starts the Floe daemon as a background Bun process
-#   4. Launches Pi with the Floe extension loaded
+#   4. Launches Pi with the Floe extension from ~/.floe/
 #
 # Usage:
 #   floe                    # Interactive mode
-#   floe "Build auth module" # Start with initial prompt
+#   floe "Build auth module" # Start with an initial prompt
 #   floe -p "Summarize"     # Print mode
 #   floe -c                 # Continue previous session
 #
@@ -18,16 +18,17 @@
 
 set -euo pipefail
 
-# Resolve the package root (bin/ → package root)
-# Follow symlinks so this works when installed globally via npm
-SOURCE="$0"
+# ── Resolve package root (follows symlinks for global npm install) ──────
+SOURCE="${BASH_SOURCE[0]}"
 while [ -L "${SOURCE}" ]; do
   DIR="$(cd "$(dirname "${SOURCE}")" && pwd)"
   SOURCE="$(readlink "${SOURCE}")"
-  # If readlink returned a relative path, resolve it
   [[ "${SOURCE}" != /* ]] && SOURCE="${DIR}/${SOURCE}"
 done
 FLOE_PKG_ROOT="$(cd "$(dirname "${SOURCE}")/.." && pwd)"
+
+# ── Floe home directory ─────────────────────────────────────────────────
+FLOE_HOME="${HOME}/.floe"
 
 # ── Ensure Pi is installed ──────────────────────────────────────────────
 if ! command -v pi &>/dev/null; then
@@ -38,9 +39,8 @@ if ! command -v pi &>/dev/null; then
     echo "Error: npm is required to install Pi. Install Node.js first: https://nodejs.org" >&2
     exit 1
   fi
-
   if ! command -v pi &>/dev/null; then
-    echo "Error: Pi installation failed. Try manually: npm install -g @mariozechner/pi-coding-agent" >&2
+    echo "Error: Pi installation failed. Try: npm install -g @mariozechner/pi-coding-agent" >&2
     exit 1
   fi
   echo "Pi installed successfully."
@@ -50,14 +50,45 @@ fi
 if ! command -v bun &>/dev/null; then
   echo "Bun is not installed. Installing..."
   curl -fsSL https://bun.sh/install | bash
-  export PATH="$HOME/.bun/bin:$PATH"
-
+  export PATH="${HOME}/.bun/bin:${PATH}"
   if ! command -v bun &>/dev/null; then
     echo "Error: Bun installation failed. Install manually: https://bun.sh" >&2
     exit 1
   fi
   echo "Bun installed successfully."
 fi
+
+# ── Sync resources to ~/.floe/ ──────────────────────────────────────────
+# Copies skills, prompts, scripts, and the Pi extension to ~/.floe/ so they
+# live alongside Pi's ~/.pi/ rather than deep in npm's node_modules tree.
+# Re-syncs automatically when the package version changes.
+sync_floe_home() {
+  local pkg_version
+  pkg_version=$(node -e "process.stdout.write(require('${FLOE_PKG_ROOT}/package.json').version)" 2>/dev/null || echo "0.0.0")
+
+  local installed_version
+  installed_version=$(cat "${FLOE_HOME}/.version" 2>/dev/null || echo "")
+
+  # Skip if already up to date
+  if [ "${pkg_version}" = "${installed_version}" ] && [ -d "${FLOE_HOME}/extensions" ]; then
+    return 0
+  fi
+
+  mkdir -p \
+    "${FLOE_HOME}/extensions" \
+    "${FLOE_HOME}/skills" \
+    "${FLOE_HOME}/prompts" \
+    "${FLOE_HOME}/scripts"
+
+  cp "${FLOE_PKG_ROOT}/extensions/floe.ts" "${FLOE_HOME}/extensions/floe.ts"
+  cp -rf "${FLOE_PKG_ROOT}/skills/."  "${FLOE_HOME}/skills/"
+  cp -rf "${FLOE_PKG_ROOT}/prompts/." "${FLOE_HOME}/prompts/"
+  cp -rf "${FLOE_PKG_ROOT}/scripts/." "${FLOE_HOME}/scripts/"
+
+  echo "${pkg_version}" > "${FLOE_HOME}/.version"
+}
+
+sync_floe_home
 
 # ── Start the Floe daemon ──────────────────────────────────────────────
 PROJECT_ROOT="$(pwd)"
@@ -78,16 +109,15 @@ if [ -f "${DAEMON_PID_FILE}" ]; then
 fi
 
 if [ "${daemon_running}" = false ]; then
-  # Clean up stale socket
   rm -f "${SOCKET_PATH}"
 
-  # Start daemon in background
-  bun run "${FLOE_PKG_ROOT}/daemon/main.ts" "${PROJECT_ROOT}" "${SOCKET_PATH}" \
+  FLOE_ROOT="${FLOE_HOME}" \
+    bun run "${FLOE_PKG_ROOT}/daemon/main.ts" "${PROJECT_ROOT}" "${SOCKET_PATH}" \
     > "${DAEMON_LOG}" 2>&1 &
   DAEMON_PID=$!
   echo "${DAEMON_PID}" > "${DAEMON_PID_FILE}"
 
-  # Wait for daemon to be ready (up to 10 seconds)
+  # Wait for daemon ready (up to 10s)
   for i in $(seq 1 40); do
     if grep -q "FLOE_DAEMON_READY" "${DAEMON_LOG}" 2>/dev/null; then
       break
@@ -99,10 +129,6 @@ if [ "${daemon_running}" = false ]; then
     fi
     sleep 0.25
   done
-
-  if ! grep -q "FLOE_DAEMON_READY" "${DAEMON_LOG}" 2>/dev/null; then
-    echo "Warning: Floe daemon may not be ready (timeout waiting for startup)" >&2
-  fi
 fi
 
 # ── Clean up daemon on exit ─────────────────────────────────────────────
@@ -118,5 +144,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ── Launch Pi with the Floe extension ───────────────────────────────────
-exec pi -e "${FLOE_PKG_ROOT}/extensions/floe.ts" "$@"
+# ── Launch Pi with the Floe extension from ~/.floe/ ─────────────────────
+export FLOE_ROOT="${FLOE_HOME}"
+exec pi -e "${FLOE_HOME}/extensions/floe.ts" "$@"
