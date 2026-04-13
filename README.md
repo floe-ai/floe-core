@@ -8,18 +8,15 @@ A [Pi](https://pi.dev) package for structured AI software delivery.
 
 ## Install
 
-### Prerequisites
-
-- [Node.js](https://nodejs.org) (for npm and Pi)
-- [Bun](https://bun.sh) (for the Floe daemon)
-
 ### Install from GitHub
 
 ```bash
 npm install -g git+https://github.com/floe-ai/floe-core.git
 ```
 
-This installs the `floe` command globally. If Pi is not installed, `floe` installs it automatically on first run.
+> Requires [Node.js](https://nodejs.org). If [Bun](https://bun.sh) or [Pi](https://github.com/mariozechner/pi-coding-agent) are not installed, `floe` will install them automatically on first run.
+
+This installs the `floe` command globally.
 
 ```bash
 floe                        # Interactive mode — you're talking to Floe
