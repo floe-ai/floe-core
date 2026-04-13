@@ -8,21 +8,18 @@ A [Pi](https://pi.dev) package for structured AI software delivery.
 
 ## Install
 
-### Option 1: Pi package (recommended)
+### Prerequisites
+
+- [Node.js](https://nodejs.org) (for npm and Pi)
+- [Bun](https://bun.sh) (for the Floe daemon)
+
+### Install from GitHub
 
 ```bash
-pi install git:github.com/floe-ai/floe-core
+npm install -g git+https://github.com/floe-ai/floe-core.git
 ```
 
-This registers Floe's extension, skills, and prompt templates globally in Pi. Then run `pi` — the Floe extension loads automatically, injects the Floe identity, and starts the daemon.
-
-### Option 2: Global npm install
-
-```bash
-npm install -g floe-core
-```
-
-This gives you the `floe` command:
+This installs the `floe` command globally. If Pi is not installed, `floe` installs it automatically on first run.
 
 ```bash
 floe                        # Interactive mode — you're talking to Floe
@@ -31,9 +28,9 @@ floe -c                     # Continue previous session
 floe -p "Summarize"         # Print mode (non-interactive)
 ```
 
-`floe` is a thin wrapper around `pi` that loads the Floe extension. All Pi flags work — see `pi --help`.
+`floe` is a wrapper around `pi` that starts the Floe daemon and loads the Floe extension. All Pi flags work — see `pi --help`.
 
-### Option 3: Run from source
+### Run from source
 
 ```bash
 git clone https://github.com/floe-ai/floe-core.git
@@ -45,12 +42,14 @@ cd floe-core && npm install
 
 ## What happens when you run Floe
 
-1. Pi starts with the Floe extension loaded
-2. The extension injects the Floe role into the system prompt — the agent **is** Floe
-3. `.floe/` project state is auto-initialised if missing
-4. The Floe daemon starts (background worker orchestration)
-5. If the project isn't configured yet, Floe runs onboarding automatically
-6. You talk to Floe — it manages planning, implementation, and review
+1. `bin/floe` ensures Pi and Bun are installed
+2. The Floe daemon starts as a background Bun process
+3. Pi starts with the Floe extension loaded
+4. The extension injects the Floe role into the system prompt — the agent **is** Floe
+5. `.floe/` project state is auto-initialised if missing
+6. The extension connects to the daemon over a Unix socket
+7. If the project isn't configured yet, Floe runs onboarding automatically
+8. You talk to Floe — it manages planning, implementation, and review
 
 ---
 
@@ -88,15 +87,17 @@ Floe ships with these Pi skills (auto-loaded when relevant):
 ## Architecture
 
 ```
-floe-core/                    Pi package
-├── bin/floe                  Wrapper: launches pi with Floe extension
-├── extensions/floe.ts        Pi extension — identity, daemon lifecycle, tools
+floe-core/
+├── bin/floe                  Wrapper: ensures deps, starts daemon, launches Pi
+├── extensions/floe.ts        Pi extension — identity, daemon client, tools
 ├── daemon/
+│   ├── main.ts               Daemon entry point (standalone Bun process)
 │   ├── service.ts            DaemonService — worker lifecycle, call coordination
 │   ├── feature-workflow.ts   Feature workflow state machine
 │   ├── pi-substrate.ts       Pi SDK session substrate (createAgentSession)
 │   ├── store.ts              Event store and state persistence
 │   ├── server.ts             Unix socket server
+│   ├── client.ts             Socket client (Node-compatible, used by extension)
 │   ├── worker-channel.ts     Persistent socket transport
 │   └── __tests__/            45 tests
 ├── skills/                   Pi skills
@@ -110,7 +111,7 @@ floe-core/                    Pi package
 | Layer | Owns |
 |-------|------|
 | **Pi** | Session hosting, model routing, tools, context, compaction |
-| **Floe extension** | Identity injection, daemon lifecycle, Floe tool registration |
+| **Floe extension** | Identity injection, daemon communication (socket client), Floe tool registration |
 | **Daemon** | Worker lifecycle, feature workflow engine, blocking-call ledger, events |
 | **Pi SDK substrate** | Spawns worker sessions via `createAgentSession()` |
 

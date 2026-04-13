@@ -1,13 +1,16 @@
 /**
  * Floe Pi extension — the main integration point between Pi and the Floe daemon.
  *
- * When loaded by Pi (via `pi install`), this extension:
+ * When loaded by Pi (via `bin/floe` or `pi -e`), this extension:
  *
- * 1. Injects the Floe identity into the system prompt via before_agent_start
- * 2. Starts the Floe daemon on session_start
- * 3. Registers Floe tools for feature management, worker coordination, etc.
- * 4. Runs onboarding when the project is not yet configured
- * 5. Shuts down the daemon cleanly on session_shutdown
+ * 1. Provides skill/prompt paths via resources_discover
+ * 2. Injects the Floe identity into the system prompt via before_agent_start
+ * 3. Connects to the Floe daemon (started by bin/floe as a separate Bun process)
+ * 4. Registers Floe tools for feature management, worker coordination, etc.
+ * 5. Runs onboarding when the project is not yet configured
+ *
+ * The extension does NOT start the daemon — that's handled by bin/floe.
+ * The extension only communicates with the daemon over the Unix socket.
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -15,27 +18,108 @@ import { Type } from "@sinclair/typebox";
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createConnection } from "node:net";
 
-import { DaemonService } from "../daemon/service.ts";
-import { DaemonServer } from "../daemon/server.ts";
-import { PiSubstrate } from "../daemon/pi-substrate.ts";
-import { sendDaemonRequest } from "../daemon/client.ts";
+// ── Node-compatible daemon client (inlined to avoid import issues) ────
 
-let daemonService: DaemonService | null = null;
-let daemonServer: DaemonServer | null = null;
+interface DaemonRequest {
+  id: string;
+  action: string;
+  payload?: Record<string, unknown>;
+}
+
+interface DaemonResponse {
+  id: string;
+  ok: boolean;
+  result?: Record<string, unknown>;
+  error?: string;
+}
+
+function sendDaemonRequest(
+  endpoint: string,
+  action: string,
+  payload?: Record<string, unknown>,
+): Promise<DaemonResponse> {
+  const request: DaemonRequest = {
+    id: `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    action,
+    payload,
+  };
+
+  return new Promise<DaemonResponse>((resolve, reject) => {
+    const socket = createConnection(endpoint);
+    let done = false;
+    let buffer = "";
+
+    const timer = setTimeout(() => {
+      if (!done) {
+        done = true;
+        socket.removeAllListeners();
+        try { socket.end(); } catch {}
+        reject(new Error("Daemon request timed out after 10s"));
+      }
+    }, 10_000);
+
+    const finish = (fn: () => void) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      socket.removeAllListeners();
+      try { socket.end(); } catch {}
+      fn();
+    };
+
+    socket.on("connect", () => {
+      socket.write(JSON.stringify(request) + "\n");
+    });
+
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf-8");
+      const idx = buffer.indexOf("\n");
+      if (idx === -1) return;
+
+      const line = buffer.slice(0, idx).trim();
+      if (!line) {
+        finish(() => reject(new Error("Empty daemon response")));
+        return;
+      }
+
+      try {
+        const response = JSON.parse(line) as DaemonResponse;
+        finish(() => resolve(response));
+      } catch (error: any) {
+        finish(() => reject(new Error(`Invalid daemon response: ${error?.message}`)));
+      }
+    });
+
+    socket.on("error", (error) => {
+      finish(() => reject(error));
+    });
+
+    socket.on("end", () => {
+      if (!done && buffer.trim()) {
+        try {
+          const response = JSON.parse(buffer.trim()) as DaemonResponse;
+          finish(() => resolve(response));
+        } catch {
+          finish(() => reject(new Error("Daemon closed connection without valid response")));
+        }
+      }
+    });
+  });
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────
 
 /** Resolve the package root (1 level up from extensions/). */
 function packageRoot(): string {
   const thisDir =
-    (import.meta as any).dir ??
     (typeof __dirname !== "undefined" ? __dirname : dirname(fileURLToPath(import.meta.url)));
   return resolve(thisDir, "..");
 }
 
 function getSocketPath(projectRoot: string): string {
-  const stateDir = join(projectRoot, ".floe", "state", "daemon");
-  mkdirSync(stateDir, { recursive: true });
-  return join(stateDir, "daemon.sock");
+  return join(projectRoot, ".floe", "state", "daemon", "daemon.sock");
 }
 
 function ensureFloeInit(projectRoot: string): void {
@@ -81,39 +165,28 @@ function loadRolePrompt(): string {
   return "You are Floe, an AI agent for structured software delivery. Help the user plan, implement, and review their software projects.";
 }
 
-async function ensureDaemon(projectRoot: string): Promise<string> {
-  const socketPath = getSocketPath(projectRoot);
-
-  if (daemonService) return socketPath;
-
-  try {
-    const result = await sendDaemonRequest(socketPath, {
-      action: "runtime.status",
-      payload: {},
-    });
-    if (result && (result as any).ok !== false) return socketPath;
-  } catch {
-    // Not running — start one
-  }
-
-  daemonService = new DaemonService(projectRoot, socketPath);
-  const piSubstrate = new PiSubstrate();
-  daemonService.setSubstrate(piSubstrate);
-  await daemonService.init();
-
-  daemonServer = new DaemonServer(daemonService, socketPath);
-  await daemonServer.start();
-
-  return socketPath;
-}
+// ── Extension ─────────────────────────────────────────────────────────
 
 export default function floeExtension(pi: ExtensionAPI) {
   const projectRoot = process.cwd();
+  const pkgRoot = packageRoot();
   let socketPath: string | null = null;
+  let daemonAvailable = false;
+
+  // ─── Resource discovery ──────────────────────────────────────────────
+  // Provide skill and prompt paths so Pi discovers them regardless of
+  // how floe was loaded (package install or -e flag).
+
+  pi.on("resources_discover", async () => {
+    return {
+      skillPaths: [join(pkgRoot, "skills")],
+      promptPaths: [join(pkgRoot, "prompts")],
+    };
+  });
 
   // ─── Identity injection ─────────────────────────────────────────────
-  // Use before_agent_start to inject the Floe role prompt into the system
-  // prompt. This makes the agent BE Floe from the first message.
+  // Append the Floe role prompt to Pi's system prompt. This makes the
+  // agent BE Floe while preserving Pi's tool usage guidelines.
 
   pi.on("before_agent_start", async (event) => {
     const floeRole = loadRolePrompt();
@@ -130,24 +203,35 @@ export default function floeExtension(pi: ExtensionAPI) {
 
   // ─── Lifecycle ───────────────────────────────────────────────────────
 
-  pi.on("session_start", async () => {
+  pi.on("session_start", async (_event, ctx) => {
     ensureFloeInit(projectRoot);
-    socketPath = await ensureDaemon(projectRoot);
+
+    // Check if daemon is available (started by bin/floe or manually)
+    socketPath = getSocketPath(projectRoot);
+    try {
+      const result = await sendDaemonRequest(socketPath, "runtime.status");
+      if (result && result.ok) {
+        daemonAvailable = true;
+      }
+    } catch {
+      daemonAvailable = false;
+      // Daemon not running — tools will report this if called
+    }
   });
 
   pi.on("session_shutdown", async () => {
-    if (daemonServer) {
-      daemonServer.close();
-      daemonServer = null;
-    }
-    daemonService = null;
+    daemonAvailable = false;
+    socketPath = null;
   });
 
   // ─── Helper: send daemon request ─────────────────────────────────────
 
   async function daemon(action: string, payload: Record<string, unknown> = {}): Promise<any> {
-    if (!socketPath) throw new Error("Floe daemon not started");
-    return sendDaemonRequest(socketPath, { action, payload });
+    if (!socketPath) throw new Error("Floe daemon socket path not set");
+    if (!daemonAvailable) throw new Error("Floe daemon is not running. Start floe using the 'floe' command.");
+    const response = await sendDaemonRequest(socketPath, action, payload);
+    if (!response.ok) throw new Error(response.error ?? "Daemon request failed");
+    return response.result;
   }
 
   // ─── Tools ───────────────────────────────────────────────────────────
@@ -260,20 +344,25 @@ export default function floeExtension(pi: ExtensionAPI) {
 
   pi.registerCommand("floe-status", {
     description: "Show Floe daemon and worker status",
-    execute: async (ctx) => {
-      const result = await daemon("runtime.status", {});
-      ctx.ui.notify(JSON.stringify(result, null, 2), "info");
+    handler: async (_args, ctx) => {
+      try {
+        const result = await daemon("runtime.status", {});
+        ctx.ui.notify(JSON.stringify(result, null, 2), "info");
+      } catch (err: any) {
+        ctx.ui.notify(`Daemon not available: ${err?.message ?? err}`, "error");
+      }
     },
   });
 
   pi.registerCommand("floe-shutdown", {
     description: "Shut down the Floe daemon",
-    execute: async (ctx) => {
-      if (daemonServer) {
-        daemonServer.close();
-        daemonServer = null;
-        daemonService = null;
+    handler: async (_args, ctx) => {
+      try {
+        await daemon("runtime.shutdown", {});
+        daemonAvailable = false;
         ctx.ui.notify("Floe daemon shut down", "info");
+      } catch (err: any) {
+        ctx.ui.notify(`Failed to shut down daemon: ${err?.message ?? err}`, "error");
       }
     },
   });

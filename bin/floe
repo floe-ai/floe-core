@@ -2,9 +2,11 @@
 #
 # floe — Structured AI delivery agent powered by Pi.
 #
-# This is a thin wrapper that launches Pi with the Floe extension loaded.
-# The Floe extension injects the Floe identity, starts the daemon, and
-# registers delivery tools.
+# This wrapper:
+#   1. Ensures Pi is installed
+#   2. Ensures Bun is installed (for the daemon)
+#   3. Starts the Floe daemon as a background Bun process
+#   4. Launches Pi with the Floe extension loaded
 #
 # Usage:
 #   floe                    # Interactive mode
@@ -12,13 +14,109 @@
 #   floe -p "Summarize"     # Print mode
 #   floe -c                 # Continue previous session
 #
-# All Pi flags are supported — this wrapper only ensures the Floe extension
-# is loaded. See `pi --help` for the full flag reference.
+# All Pi flags are supported. See `pi --help` for the full flag reference.
 
 set -euo pipefail
 
 # Resolve the package root (bin/ → package root)
-FLOE_PKG_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Follow symlinks so this works when installed globally via npm
+SOURCE="$0"
+while [ -L "${SOURCE}" ]; do
+  DIR="$(cd "$(dirname "${SOURCE}")" && pwd)"
+  SOURCE="$(readlink "${SOURCE}")"
+  # If readlink returned a relative path, resolve it
+  [[ "${SOURCE}" != /* ]] && SOURCE="${DIR}/${SOURCE}"
+done
+FLOE_PKG_ROOT="$(cd "$(dirname "${SOURCE}")/.." && pwd)"
 
-# Launch Pi with the Floe extension
+# ── Ensure Pi is installed ──────────────────────────────────────────────
+if ! command -v pi &>/dev/null; then
+  echo "Pi is not installed. Installing @mariozechner/pi-coding-agent globally..."
+  if command -v npm &>/dev/null; then
+    npm install -g @mariozechner/pi-coding-agent
+  else
+    echo "Error: npm is required to install Pi. Install Node.js first: https://nodejs.org" >&2
+    exit 1
+  fi
+
+  if ! command -v pi &>/dev/null; then
+    echo "Error: Pi installation failed. Try manually: npm install -g @mariozechner/pi-coding-agent" >&2
+    exit 1
+  fi
+  echo "Pi installed successfully."
+fi
+
+# ── Ensure Bun is installed ─────────────────────────────────────────────
+if ! command -v bun &>/dev/null; then
+  echo "Bun is not installed. Installing..."
+  curl -fsSL https://bun.sh/install | bash
+  export PATH="$HOME/.bun/bin:$PATH"
+
+  if ! command -v bun &>/dev/null; then
+    echo "Error: Bun installation failed. Install manually: https://bun.sh" >&2
+    exit 1
+  fi
+  echo "Bun installed successfully."
+fi
+
+# ── Start the Floe daemon ──────────────────────────────────────────────
+PROJECT_ROOT="$(pwd)"
+SOCKET_DIR="${PROJECT_ROOT}/.floe/state/daemon"
+SOCKET_PATH="${SOCKET_DIR}/daemon.sock"
+DAEMON_PID_FILE="${SOCKET_DIR}/daemon.pid"
+DAEMON_LOG="${SOCKET_DIR}/daemon.log"
+
+mkdir -p "${SOCKET_DIR}"
+
+# Check if daemon is already running
+daemon_running=false
+if [ -f "${DAEMON_PID_FILE}" ]; then
+  old_pid=$(cat "${DAEMON_PID_FILE}" 2>/dev/null || true)
+  if [ -n "${old_pid}" ] && kill -0 "${old_pid}" 2>/dev/null; then
+    daemon_running=true
+  fi
+fi
+
+if [ "${daemon_running}" = false ]; then
+  # Clean up stale socket
+  rm -f "${SOCKET_PATH}"
+
+  # Start daemon in background
+  bun run "${FLOE_PKG_ROOT}/daemon/main.ts" "${PROJECT_ROOT}" "${SOCKET_PATH}" \
+    > "${DAEMON_LOG}" 2>&1 &
+  DAEMON_PID=$!
+  echo "${DAEMON_PID}" > "${DAEMON_PID_FILE}"
+
+  # Wait for daemon to be ready (up to 10 seconds)
+  for i in $(seq 1 40); do
+    if grep -q "FLOE_DAEMON_READY" "${DAEMON_LOG}" 2>/dev/null; then
+      break
+    fi
+    if ! kill -0 "${DAEMON_PID}" 2>/dev/null; then
+      echo "Error: Floe daemon failed to start. Check ${DAEMON_LOG}" >&2
+      cat "${DAEMON_LOG}" >&2
+      exit 1
+    fi
+    sleep 0.25
+  done
+
+  if ! grep -q "FLOE_DAEMON_READY" "${DAEMON_LOG}" 2>/dev/null; then
+    echo "Warning: Floe daemon may not be ready (timeout waiting for startup)" >&2
+  fi
+fi
+
+# ── Clean up daemon on exit ─────────────────────────────────────────────
+cleanup() {
+  if [ "${daemon_running}" = false ] && [ -f "${DAEMON_PID_FILE}" ]; then
+    local pid
+    pid=$(cat "${DAEMON_PID_FILE}" 2>/dev/null || true)
+    if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+      kill "${pid}" 2>/dev/null || true
+    fi
+    rm -f "${DAEMON_PID_FILE}" "${SOCKET_PATH}"
+  fi
+}
+trap cleanup EXIT
+
+# ── Launch Pi with the Floe extension ───────────────────────────────────
 exec pi -e "${FLOE_PKG_ROOT}/extensions/floe.ts" "$@"

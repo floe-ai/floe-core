@@ -1,4 +1,4 @@
-import type { WorkerConfig, WorkerRole } from "../types.ts";
+import type { WorkerConfig, WorkerRole } from "./worker-types.ts";
 
 export type RuntimeRunState =
   | "initialising"
