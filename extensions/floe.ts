@@ -124,7 +124,9 @@ function getSocketPath(projectRoot: string): string {
 
 function ensureFloeInit(projectRoot: string): void {
   const floeDir = join(projectRoot, ".floe");
-  if (existsSync(floeDir)) return;
+  // Check config.json specifically — .floe/ may already exist because
+  // bin/floe creates .floe/state/daemon/ before Pi starts.
+  if (existsSync(join(floeDir, "config.json"))) return;
 
   mkdirSync(floeDir, { recursive: true });
   mkdirSync(join(floeDir, "state"), { recursive: true });
@@ -205,6 +207,13 @@ export default function floeExtension(pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     ensureFloeInit(projectRoot);
+
+    // Stamp FLOE_ROOT into process.env so Pi's bash tool (child processes)
+    // inherit it. bin/floe also exports it, but setting it here ensures it
+    // is always available regardless of how the extension was loaded.
+    if (!process.env.FLOE_ROOT) {
+      process.env.FLOE_ROOT = pkgRoot;
+    }
 
     // Check if daemon is available (started by bin/floe or manually)
     socketPath = getSocketPath(projectRoot);
